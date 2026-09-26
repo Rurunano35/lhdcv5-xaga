@@ -224,6 +224,10 @@ xaga 上可用 —— 硬件 offload 通路（`MtkBTAudioProviderA2dpHW`）的 `
 
 > 安装后模块目录即交付物本身，`payload/` 中各文件的目标路径与 SELinux 标签见
 > `post-fs-data.sh`，逐项说明见 [模块 README](module/lhdcv5-real/README.md)。
+>
+> **文档中出现的 `tools/`、`reference/`、`artifacts/`、`romwork/` 等路径不在本仓库内** ——
+> 它们是调查过程中在开发者本地建立的逆向脚本、第三方仓库副本、设备 dump 与固件提取产物。
+> 本仓库只发布模块源码与文档；文中的结论不需这些文件即可阅读。
 
 ---
 
