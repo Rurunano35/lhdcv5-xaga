@@ -3,4 +3,4 @@ name=LHDC V5 Real Path (xaga)
 version=v1.0
 versionCode=1
 author=xaga-lhdcv5
-description=在 Redmi Note 11T Pro (xaga) 上打通 LHDC V5 通路：让蓝牙协议栈走 AIDL 传输层，LHDC V5 以 codec_type=12 原生送达 HAL（不再伪装为 V3），并放开软件 PCM 采样率上限至 192 kHz。共两部分：(1) Zygisk 内存补丁，解除 createCodec 对 ro.product.name 的机型白名单限制；(2) 开机挂载，顶替 HIDL 实现库以点亮 AIDL 服务、并放宽 BT 音频策略采样率。所有改动仅存在于内存，磁盘零写入。
+description=在 Redmi Note 11T Pro (xaga) 上打通 LHDC V5 通路：让蓝牙协议栈走 AIDL 传输层，LHDC V5 以 codec_type=12 原生送达 HAL，并放开软件 PCM 采样率上限至 192 kHz。共两部分：(1) Zygisk 内存补丁，解除 createCodec 对 ro.product.name 的机型白名单限制；(2) 开机挂载，顶替 HIDL 实现库以点亮 AIDL 服务、并放宽 BT 音频策略采样率。所有改动仅存在于内存，磁盘零写入。
