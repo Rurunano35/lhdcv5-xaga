@@ -1,0 +1,28 @@
+# 外部输入与派生数据 —— 不入库
+
+# tools：逆向分析脚本与设备原始 dump。属于本地调查工具，不随仓库发布。
+tools/
+
+# romwork：从线刷包提取的固件分区（super.img / vendor_a.img 等）
+romwork/
+
+# reference：克隆的第三方仓库（liblhdc-collections / liblhdcv5 /
+# android_vendor_savitech_lhdc / AOSP 源码落盘）
+reference/
+
+# artifacts：从设备拉取的原始 .so（体积大，且可从设备或 payload 重建）
+artifacts/
+
+# _archive：整理过程中归入归档的中间产物与过程记录
+_archive/
+
+# _scratch：调查过程中的工作区（临时拉取的 .so 等派生数据）
+_scratch/
+
+# 构建产物
+*.o
+*.so.tmp
+# zygisk-src 下是构建中间产物，入库的是 module/lhdcv5-real/zygisk/arm64-v8a.so
+module/lhdcv5-real/zygisk-src/arm64-v8a.so
+__pycache__/
+*.pyc
