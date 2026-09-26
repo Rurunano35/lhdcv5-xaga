@@ -22,6 +22,7 @@ _scratch/
 # 构建产物
 *.o
 *.so.tmp
+dist/
 # zygisk-src 下是构建中间产物，入库的是 module/lhdcv5-real/zygisk/arm64-v8a.so
 module/lhdcv5-real/zygisk-src/arm64-v8a.so
 __pycache__/
