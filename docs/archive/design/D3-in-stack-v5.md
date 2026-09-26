@@ -1,6 +1,6 @@
-# D3 —— 路线设计：「栈内真 V5 转换（不伪装 codec_type）」
+# D3 —— 路线设计：「栈内 V5 转换（不伪装 codec_type）」
 
-> 任务：设计并验证「在 libbluetooth_jni.so 内提供一个真正的 HIDL 版 `A2dpLhdcV5ToHalConfig`，
+> 任务：设计并验证「在 libbluetooth_jni.so 内提供一个 HIDL 版 `A2dpLhdcV5ToHalConfig`，
 > 让 codec_type=12 在 HIDL 路径上被正确处理，不再把 12 改写成 10」这条路线。
 >
 > 采集方式：全程只读（adb shell 读取 / dumpsys / logcat / 本地二进制反汇编）。
@@ -18,12 +18,12 @@
 | (a) execmem 是否允许？ | **允许**。设备策略 `(allow appdomain self (process (execmem)))`，且 `bluetooth ∈ appdomain`。报告「bluetooth 域无 execmem 规则」**是错的**（那只是 execmod）。 |
 | (a) execmod 是否允许？ | 不允许（无任何 allow）。但**新函数根本不需要它**：模块 `.so` 标签为 `system_lib_file`，而 `(allow domain system_lib_file (file (read getattr map execute open)))` 对**所有域**放行 → 编译进模块 `.so` 的函数天然可执行。 |
 | (a) 「table[12] 指向我们自己的函数」可行吗？ | **不可行**，且与 execmem 无关。跳转表表项是**无符号字节**，目标 = `0x825f34 + 表项×4`，**只能向前跳 1020 字节**，物理上够不到模块代码。 |
-| (a) 那真正的注入点在哪？ | **`A2dpLhdcV3ToHalConfig` 的 GOT 槽（`0xf98d80`）**。该函数**全库只有 1 个调用点**（`0x826090`，即 table[10]/table[12] 共用的 stub），重定向它即可让 table[12] 走到我们的实现。**无需分配任何新可执行内存。** |
+| (a) 那注入点在哪？ | **`A2dpLhdcV3ToHalConfig` 的 GOT 槽（`0xf98d80`）**。该函数**全库只有 1 个调用点**（`0x826090`，即 table[10]/table[12] 共用的 stub），重定向它即可让 table[12] 走到我们的实现。**无需分配任何新可执行内存。** |
 | (b) V5 能否完整映射到 HIDL？ | **不能**。HIDL `LhdcParameters` 实测 **8 字节 5 字段**（`sampleRate/channelMode/bitsPerSample/isLLEnabled/isLLSupported`），**无版本号、无 CIE、无码率档位、无 AR/JAS/META/Lossless**。 |
-| (c) 能真到什么程度？ | **只能"路由真、载荷伪"**。HIDL 边界的 `codecType` 对 V3/V5 **都是 `0x20`(LHDC)** —— 12 从未到达 HAL。所以「不伪装 codec_type」在 HIDL 边界上是**空操作**：真 V5 转换函数产出的字节与现状**逐字节相同**。 |
+| (c) 能到什么程度？ | **只能"路由为真、载荷为伪"**。HIDL 边界的 `codecType` 对 V3/V5 **都是 `0x20`(LHDC)** —— 12 从未到达 HAL。所以「不伪装 codec_type」在 HIDL 边界上是**空操作**：V5 转换函数产出的字节与现状**逐字节相同**。 |
 | (d) HAL 侧能否补丁？ | **能注入（ptrace），但不值得**。HAL 是 pid 1006 `u:r:mtk_hal_audio:s0`、PPID=1（**非 zygote 子进程 → Zygisk 无法注入**）；不过 root 所在 `u:r:ksu:s0` 被 KernelSU 设为 **permissive**，ptrace 技术可行。但 HAL 软件通路根本不读 codec 配置。 |
 | (e) 相比现状多得到什么？ | **功能收益 = 0**（载荷逐字节相同）。非功能收益 ≈ 0（补丁点从 2 个 GOT 槽减到 1 个，但多出 1 个结构体偏移依赖）。 |
-| (f) 该不该做？ | **不值得做**。除非目标只是"语义诚实"。真正的 V5 通路必须走 MTK AIDL（`Lhdcv5Configuration` 现成），而 AIDL 实现库在设备上不存在。 |
+| (f) 该不该做？ | **不值得做**。除非目标只是"语义诚实"。V5 通路必须走 MTK AIDL（`Lhdcv5Configuration` 现成），而 AIDL 实现库在设备上不存在。 |
 
 ---
 
@@ -84,7 +84,7 @@ table@0x2c5620 = 00 26 46 46 4b 5a 5a 5a 5a 50 55 5a 5a 00 26 00
 | `A2dpCodecConfig::getCodecSpecificConfig` | 0xf48240 | 24 |
 
 > 现状 P2 重定向 `getCodecConfig` 的 GOT 槽，等于给这 **46 个调用点**全部加了一层间接跳转；
-> 而"真 V5 转换"设计只需要动那 **1 个**调用点所在的 GOT 槽。
+> 而"V5 转换"设计只需要动那 **1 个**调用点所在的 GOT 槽。
 
 ---
 
@@ -177,7 +177,7 @@ KernelSU 把 zygisk 模块 `.so` 重新打标为 `system_lib_file`，而第 7787
 
 ---
 
-## 3. (b) 真正的 V5 → HIDL 转换设计
+## 3. (b) V5 → HIDL 转换设计
 
 ### 3.1 全部相关结构体布局（反汇编实测，非推测）
 
@@ -271,7 +271,7 @@ struct CodecConfiguration {          // 偏移     验证指令
 | **CIE P10（LLESSRaw）** | — | ❌ | Lossless 原始配置 |
 | 帧长/MTU 控制 | `peerMtu` | 部分 | 仅 2 字节且已被"有效帧长"占用 |
 
-### 3.3 对照：MTK AIDL 的 V5 转换函数（真 V5 的参考实现）
+### 3.3 对照：MTK AIDL 的 V5 转换函数（V5 的参考实现）
 
 `aidl::codec::A2dpLhdcv5ToHalConfig` @`0x83fd80`（本机为不可达通路上的活代码）：
 
@@ -289,7 +289,7 @@ struct CodecConfiguration {          // 偏移     验证指令
 ⇒ **AIDL 是唯一能保留 LHDC 版本 + 完整 CIE 的通路**，这也印证了 R1/R4 的结论。
 但设备上 **不存在任何 AIDL 实现库**（`/vendor/lib64/hw/` 只有 HIDL impl；vintf manifest 无 `format="aidl"`）。
 
-### 3.4 设计：栈内"真 V5 转换"（唯一可行形态）
+### 3.4 设计：栈内"V5 转换"（唯一可行形态）
 
 **为什么不能用「table[12] → 我们的函数」**
 
@@ -362,7 +362,7 @@ bool hooked_lhdc_v5_to_hal(void* out, void* cfg) {
 
 ---
 
-## 4. (c) 严格技术边界：HIDL 上「真 V5」能真到什么程度
+## 4. (c) 严格技术边界：HIDL 上「V5」能到什么程度
 
 ### 4.1 一个必须先澄清的事实：**12 从来没有到过 HAL**
 
@@ -378,7 +378,7 @@ bool hooked_lhdc_v5_to_hal(void* out, void* cfg) {
 | 目标 | 可达性 | 说明 |
 |---|---|---|
 | 「codec_type 保留 12，且 HAL 接受」 | ✅ **可达** | 即 §3.4 的设计：HAL 收到 `codecType=0x20`（它本来也只能收到这个），栈内 12 不再被改写 |
-| 「HAL 收到的字节与现状不同」 | ❌ **不可达** | V3 转换函数**零钳位、零改写**，只透传 5 个与版本无关的字段；真 V5 转换函数写出的字节**逐字节相同** |
+| 「HAL 收到的字节与现状不同」 | ❌ **不可达** | V3 转换函数**零钳位、零改写**，只透传 5 个与版本无关的字段；V5 转换函数写出的字节**逐字节相同** |
 | 「HAL 收到 LHDC 版本号」 | ❌ **不可达（HIDL）** | `LhdcParameters` 8 字节无版本字段；唯一空闲字节是 `isLLSupported` |
 | 「HAL 收到 CIE（AR/JAS/META/Lossless/帧长/码率档位）」 | ❌ **不可达（HIDL）** | `CodecSpecific` 变体成员只有 7 个，无 V5 容器；`vendorConfig` 逃生口只有 **AIDL** 有 |
 | 用 `isLLSupported` 当 V5 标记 | ⚠️ 理论可行 | 结构上唯一空闲字节。但**没有任何消费者**（见 §5.1），且语义撒谎（V5 本身支持 LL） |
@@ -386,11 +386,11 @@ bool hooked_lhdc_v5_to_hal(void* out, void* cfg) {
 
 ### 4.3 是否必须改 HAL？
 
-**功能上：不必；语义上：必须出新 `.hal` 才能真。**
+**功能上：不必；语义上：必须出新 `.hal` 才能原生送达。**
 
 - 软件编码通路（本机实际走的）**完全不读 codec 配置**：
   - `A2dpSoftwareAudioProvider::startSession` 只查 `getDiscriminator()==0` + `IsSoftwarePcmConfigurationValid`；
-  - 实测日志只有 `.pcmConfig = {...}` 被真正消费（R3/R7/R8 已证，本轮复算一致）。
+  - 实测日志只有 `.pcmConfig = {...}` 被消费（R3/R7/R8 已证，本轮复算一致）。
 - HIDL 侧 `lhdcConfig` **7/7 调用点全部是日志字符串拼接**（本轮独立复核）：
   ```
   hal22.so:  xref 到 ".lhdcConfig = " 的 4 处 -> 0x14344 / 0x19098 / 0x1bbe8 / 0x206a0
@@ -400,7 +400,7 @@ bool hooked_lhdc_v5_to_hal(void* out, void* cfg) {
 - `audio.bluetooth.default.so` 里 **"LHDC" 字样计数 = 0**（HAL 模块与 codec 无关）。
 - `audio.primary.mediatek.so` 里只有音频格式枚举名 `AUDIO_FORMAT_LHDC` / `AUDIO_FORMAT_LHDC_LL`。
 
-⇒ 即使把 HIDL 结构塞满，**HAL 也不会因此多做任何事**。要"真 V5"生效，必须
+⇒ 即使把 HIDL 结构塞满，**HAL 也不会因此多做任何事**。要"V5"生效，必须
 **厂商出新 `.hal`（加 `lhdcv5Config`）+ 出 AIDL 实现** —— 等价于要求厂商出固件。
 
 ---
@@ -455,7 +455,7 @@ KernelSU 的 `u:r:ksu:s0` 被显式设为 **permissive**：
 
 逐项对照（HAL 边界，实测日志为准）：
 
-| HAL 收到的字段 | 现状（P0+P1+P2 伪装 V3） | 「真 V5 栈内转换」 |
+| HAL 收到的字段 | 现状（P0+P1+P2 伪装 V3） | 「V5 栈内转换」 |
 |---|---|---|
 | `codecType` | `LHDC` (0x20) | `LHDC` (0x20) — **相同** |
 | `encodedAudioBitrate` | 实际码率（400000/900000/9999999） | 相同（公共尾填，不受转换函数影响） |
@@ -491,7 +491,7 @@ KernelSU 的 `u:r:ksu:s0` 被显式设为 **permissive**：
 > 只是把一个"内部改写 codec_type"的实现换成"内部按偏移写结构体"的实现。
 > 唯一的正当理由是想让代码语义上不再出现"伪装成 V3"这一行为——属于工程洁癖，不是功能需求。
 >
-> 若哪天真要让 HAL 携带 V5 语义，**唯一路径是 AIDL**（`Lhdcv5Configuration` 已存在且能保留版本号 + CIE），
+> 若哪天要让 HAL 携带 V5 语义，**唯一路径是 AIDL**（`Lhdcv5Configuration` 已存在且能保留版本号 + CIE），
 > 而它要求：厂商 AIDL 实现库 + VINTF `format="aidl"` 声明 + service_contexts 条目 + SELinux 规则
 > + `libbluetooth_audio_session_aidl.so`（设备全缺）。等价于要求厂商出固件。
 
@@ -504,7 +504,7 @@ KernelSU 的 `u:r:ksu:s0` 被显式设为 **permissive**：
 | 方案 | 可行性 | 功能收益 |
 |---|---|---|
 | **现状：P0+P1+P2 伪装 V3** | ✅ 已实现并验证 | — |
-| **栈内真 V5 转换（§3.4 设计）** | ✅ **技术完全可行**，且不需要任何新 SELinux 权限 | **0** |
+| **栈内 V5 转换（§3.4 设计）** | ✅ **技术完全可行**，且不需要任何新 SELinux 权限 | **0** |
 | table[12] → 模块新函数 | ❌ **物理不可行**（跳转表只有 +1020 字节前向可达） | — |
 | HAL 进程内补丁 | ⚠️ 技术上可行（ksu permissive + ptrace），实践上不可取 | 0（HAL 不读 codec 配置） |
 | 让 HAL 原生携带 V5 | ❌ 需厂商新 `.hal` + AIDL 实现 = 出固件 | 0（软件通路不消费） |
@@ -534,14 +534,14 @@ KernelSU 的 `u:r:ksu:s0` 被显式设为 **permissive**：
 | # | 既有说法 | 本轮核实 |
 |---|---|---|
 | 1 | 技术文档 §4.2「bluetooth 域无 execmod / **execmem** 规则」 | **后半句错误**。execmod 无 allow（正确）；execmem **有**（`allow appdomain self:process execmem`，bluetooth ∈ appdomain）。 |
-| 2 | 任务描述「table[12] 指向我们自己的函数，需要 execmem」 | 前提不成立：**跳转表只能向前跳 1020 字节**（无符号字节表项），够不到模块代码；而真 V5 转换的注入点是 `A2dpLhdcV3ToHalConfig` 的 **GOT 槽**（全库仅 1 个调用点）。 |
+| 2 | 任务描述「table[12] 指向我们自己的函数，需要 execmem」 | 前提不成立：**跳转表只能向前跳 1020 字节**（无符号字节表项），够不到模块代码；而 V5 转换的注入点是 `A2dpLhdcV3ToHalConfig` 的 **GOT 槽**（全库仅 1 个调用点）。 |
 | 3 | R3/R8「HAL 只吃 `pcmConfig`」 | **成立**，且本轮补强：`CodecConfiguration` 里 `encodedAudioBitrate` / `peerMtu` 确实被填了真值（公共尾 0x825fdc），但软件通路仍不消费。 |
 | 4 | 「HIDL `lhdcConfig` 无 V5 字段」 | **成立且已量化**：`LhdcParameters` = **8 字节 / 5 字段**，唯一空闲字节是 `isLLSupported`（+0x07）。 |
 | 5 | R8「`A2dpLhdcV3ToHalConfig` 的 `getCodecSpecificConfig()` 是死调用」 | **成立**（全函数扫描：无任何指令读取该 0x3c 字节缓冲）。**这是 V5 CIE 被丢弃的确切位置。** |
 | 6 | 新增 | HIDL `CodecSpecific` 变体成员穷举 = `sbcConfig / aacConfig / aptxConfig / ldacConfig / lhdcConfig / leAudioCodecConfig / pcmConfig`；`lhdcConfig` 判别值 = **4**；**无 `vendorConfig`、无 `lhdcv5Config`**。 |
 | 7 | 新增 | `CodecConfiguration` 精确布局（`codecType@0x00`、`encodedAudioBitrate@0x04`、`peerMtu@0x08`、`isScmstEnabled@0x0a`、`config@0x0c`），由 AOSP `types.hal:225` + 三处反汇编交叉确认。 |
 | 8 | 新增 | KernelSU `u:r:ksu:s0` 为 **permissive**（`rules.c:87`）+ `allow ksu * * *` + 无 Yama ⇒ root 可 ptrace 任意进程（含 HAL）。 |
-| 9 | 新增 | 模块 `.so` 标签为 `system_lib_file`（非 `adb_data_file`），`allow domain system_lib_file:file {read getattr map execute open}` ⇒ **任意域可 map+execute 模块代码**，这是"新函数可执行"的真正依据。 |
+| 9 | 新增 | 模块 `.so` 标签为 `system_lib_file`（非 `adb_data_file`），`allow domain system_lib_file:file {read getattr map execute open}` ⇒ **任意域可 map+execute 模块代码**，这是"新函数可执行"的依据。 |
 | 10 | 新增 | 设备**无 `precompiled_sepolicy`** ⇒ 运行时策略由 `/system/etc/selinux/*.cil` + `/vendor/etc/selinux/*.cil` 开机编译，CIL 文本即权威策略源（策略论证因此成立）。 |
 | 11 | 新增 | `A2dpLhdcV3ToHalConfig` 全库**只有 1 个调用点**（0x826090）；`getCodecConfig` 有 **46 个**调用点 ⇒ 现状 P2 的 GOT 重定向面比必要的大得多。 |
 | 12 | 新增 | HIDL V3 转换函数**不写** `codec_priority` / `codec_specific_1` / `codec_specific_3` / `codec_specific_4`。 |

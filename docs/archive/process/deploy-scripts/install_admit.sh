@@ -10,7 +10,7 @@ chmod 0644 /data/adb/modules/lhdcv5-admit/module.prop
 chmod 0644 /data/adb/modules/lhdcv5-admit/zygisk/arm64-v8a.so
 rm -f /data/adb/modules/lhdcv5-admit/disable
 
-# 停用旧的伪装模块（P1/P2 属于 HIDL 伪装时期，真 V5 通路已不需要）
+# 停用旧的伪装模块（P1/P2 属于 HIDL 伪装时期，V5 通路已不需要）
 if [ -d /data/adb/modules/lhdcv5 ]; then
   touch /data/adb/modules/lhdcv5/disable
 fi

@@ -18,7 +18,7 @@
 | (c) lhdcConfig 用途 | **HAL 完全不用**。7 处 `lhdcConfig()` 调用全部在调试字符串拼接里（`.lhdcConfig = `）。软件通路只用 `pcmConfig`；卸载通路只用 `codecConfig.codecType` + 各 codec 的 sampleRate/bits/channelMode |
 | (d) PCM 通路 | 应用 → AudioFlinger → `audio.bluetooth.default.so`（"bluetooth" 音频 HAL 模块，**同在 pid 1006**）`out_write` → `BluetoothAudioPortOut::WriteData` → `BluetoothAudioSession::OutWritePcmData` → **FMQ 写**；BT 栈 `libbluetooth_jni.so` 从同一 FMQ **读**。**不是** `IBluetoothAudioHost::streamOut` |
 | (e) AIDL | 接口库在 APEX（`vendor.mediatek.hardware.bluetooth.audio-V1-ndk.so`，含 `Lhdcv5Configuration`/`Lhdcv5Capabilities`），但**设备上没有任何 AIDL 实现**（无服务、VINTF 无 aidl 条目、/vendor 无 -ndk 实现库）→ 该 HAL **只支持 HIDL** |
-| (f) 最小改动 | **软件通路下 HAL 侧零改动**（HAL 与 codec 无关）。真正的缺口在 HIDL 接口本身没有 V5 结构 → 无法"真 V5"。文件在 `/vendor`（非 APEX），但 `/vendor` 是 `dm-12 = vendor-verity` erofs ro；**可 bind-mount 替换**（音频 HAL 服务与 init **同一 mount namespace**） |
+| (f) 最小改动 | **软件通路下 HAL 侧零改动**（HAL 与 codec 无关）。缺口在 HIDL 接口本身没有 V5 结构 → 无法"V5"。文件在 `/vendor`（非 APEX），但 `/vendor` 是 `dm-12 = vendor-verity` erofs ro；**可 bind-mount 替换**（音频 HAL 服务与 init **同一 mount namespace**） |
 | (g) 192 kHz | **不支持**。三道闸：音频策略 `samplingRates` 上限 96000；HAL 的 `IsSoftwarePcmConfigurationValid(_2_1)` 显式拒绝 `sampleRate` 位 `0x10/0x20`；`kSoftwarePcmCapabilities` 只声明到 96000。`LoadAudioConfig` 里有 0x20→192000 的映射，但过不了校验 |
 
 ---
@@ -467,7 +467,7 @@ I/bt_stack: [hal_version_manager.cc(107)] V2_1::IBluetoothAudioProvidersFactory:
   但它写到 HIDL 结构里的 `codecType` 仍然是 **32 = LHDC**（§3.1 已验证），
   `lhdcConfig` 里也只有 sampleRate/channelMode/bitsPerSample/isLLEnabled —— **对 HAL 而言与真实 V3 无区别**。
 
-### 7.2 若要"真正的 V5 通路"（不伪装），缺口清单
+### 7.2 若要"V5 通路"（不伪装），缺口清单
 
 | 层 | 需要什么 | 本机可行性 |
 |---|---|---|
@@ -477,7 +477,7 @@ I/bt_stack: [hal_version_manager.cc(107)] V2_1::IBluetoothAudioProvidersFactory:
 | 音频策略 | 软件通路 ≤96 kHz 无需改动；192 kHz 需改 `samplingRates`（见 §8） | 可改（/vendor 只读，见 7.3） |
 | 卸载通路启用 | `persist.bluetooth.a2dp_offload.cap` 需含 LHDC；`audio_policy_configuration.xml` primary 模块的 `BT A2DP Out` `encodedFormats` 需加 LHDC | 属性可改；xml 只读 |
 
-**要点**：所谓"HAL 支持 V5"在本机型上是一个**伪需求** —— 真正的瓶颈是 HIDL 结构体没有 V5 字段，
+**要点**：所谓"HAL 支持 V5"在本机型上是一个**伪需求** —— 瓶颈是 HIDL 结构体没有 V5 字段，
 而不是 HAL 不认 V5。因此"不伪装"的可行形态只能是 **栈侧原生 V5 分支 + HIDL 仍传 LHDC(32)+8 字节 lhdcConfig**，
 即：**在 HIDL 链路上，V3 与 V5 在结构上必然同形，"伪装"无法被完全消除**。
 
@@ -641,7 +641,7 @@ cf 03 00 00 | 03 | 07 | 00 00 | 00 00 00 00
 ### 9.3 未知
 
 - 耳机侧 Redmi Buds 5 Pro 在 192 kHz 下的实际接受行为（本机不可能送达，未测）。
-- 若走卸载通路（需改 `persist.bluetooth.a2dp_offload.cap`），LHDC 的 `codecType=32 → return true` 之后 DSP 侧是否真能编码 —— 未验证，且本机 `support_lhdc=false`（`/product/etc/device_features/xaga.xml`）。
+- 若走卸载通路（需改 `persist.bluetooth.a2dp_offload.cap`），LHDC 的 `codecType=32 → return true` 之后 DSP 侧是否能编码 —— 未验证，且本机 `support_lhdc=false`（`/product/etc/device_features/xaga.xml`）。
 - `android.hardware.bluetooth.audio@2.1::IBluetoothAudioProvidersFactory/default`（AOSP 包，同样在 pid 1006 注册）是否会在某些条件下被栈选中 —— 日志只显示选了厂商 @2.2，未穷举。
 
 ---
@@ -653,7 +653,7 @@ cf 03 00 00 | 03 | 07 | 00 00 | 00 00 00 00
 | "厂商侧**不存在 AIDL 实现**（全盘搜索确认），协议栈内的 AIDL 版 V5 代码是死代码" | ✅ **成立**。三重否定：`service list` 无该服务、VINTF 无 `format="aidl"`、/vendor 无 `-ndk` 实现库 |
 | "设备走的是 HIDL 链路" | ✅ **成立**。`HalVersionManager` 探 AIDL 后落到 `hidl vendor.mediatek.hardware.bluetooth.audio@2.2` |
 | "HIDL 的 `CodecSpecific` 根本没有 V5 字段" | ✅ **成立且更强**：`LhdcParameters` 实测仅 8 字节 `{sampleRate, channelMode, bitsPerSample, isLowLatencyEnabled}`，**连版本字段都没有** |
-| "HAL 只有旧版 `lhdcConfig`，**上限 88200 Hz**" | ❌ **不准确**。HAL 里没有任何"LHDC 专用上限"：① 卸载校验函数**根本没有 LHDC 分支**（对 codecType=32 直接放行、不做参数校验）；② 软件通路的 PCM 白名单是 `{44100,48000,88200,96000,16000,24000}`，**含 96000**。真正卡住 96 kHz 的不是 HAL 而是……并没有卡住（实测 96 kHz 通过）。"88200"这个数字在 HAL 二进制里找不到依据 |
+| "HAL 只有旧版 `lhdcConfig`，**上限 88200 Hz**" | ❌ **不准确**。HAL 里没有任何"LHDC 专用上限"：① 卸载校验函数**根本没有 LHDC 分支**（对 codecType=32 直接放行、不做参数校验）；② 软件通路的 PCM 白名单是 `{44100,48000,88200,96000,16000,24000}`，**含 96000**。卡住 96 kHz 的不是 HAL 而是……并没有卡住（实测 96 kHz 通过）。"88200"这个数字在 HAL 二进制里找不到依据 |
 | "**192 kHz 不可能**（策略只声明到 96000）" | ✅ **成立，但理由要补全**：除了策略 `samplingRates`，HAL 的 `IsSoftwarePcmConfigurationValid(_2_1)` 会**显式拒绝** `sampleRate` 位 `0x20`；HAL 能力宣告 `0x3cf` 也不含 0x20 |
 | "P2 伪装把 codec_type 12 改写为 10" | ✅ 成立；补充：改写只发生在**栈内部**，写进 HIDL 结构的 `codecType` 仍是 **32 = LHDC**，因此对 HAL 而言伪装前后的配置**逐字节等价**（HAL 不看 codec） |
 | "阻断点：HIDL 代次的音频 HAL 接口没有 LHDC V5 结构 → 音频通路无法建立" | ⚠️ **需修正**：通路无法建立的直接原因是**栈侧** `a2dp_get_selected_hal_codec_config` 对 `codec_type=12` 没有分支（`a2dp_encoding_hidl.cc:359`），HAL 侧从未收到过该配置。HAL 的软件通路对 codec 完全无感知，**并不构成阻断** |

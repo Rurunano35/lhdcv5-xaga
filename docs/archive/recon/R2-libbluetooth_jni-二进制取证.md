@@ -20,7 +20,7 @@
 | AIDL 版 V5 转换函数存在吗？ | **存在两套**：MTK 与 AOSP 各一 | 已验证 |
 | AIDL 的 codec_type 跳转表把 12 路由到哪？ | **正确路由到 `A2dpLhdcv5ToHalConfig`** —— AIDL 通路不需要补跳转表 | 已验证 |
 | HIDL/AIDL 如何选择？ | `AServiceManager_checkService()` 探测 + HIDL `getService`；**不读任何属性** | 已验证 |
-| 有运行时开关能强制走 AIDL 吗？ | **没有**。需要 vendor 侧真的注册 AIDL 服务 | 已验证 |
+| 有运行时开关能强制走 AIDL 吗？ | **没有**。需要 vendor 侧注册 AIDL 服务 | 已验证 |
 | 本机为何走 HIDL？ | `/vendor/etc/vintf/manifest.xml` 只有 `format="hidl"` 的 2.1/2.2；AIDL -ndk 库在设备上**根本不存在** | 已验证 |
 | 报告称 AIDL `A2dpLhdcv5ToHalConfig` 是"死代码" | **表述不准确**。它是**活代码**（`aidl::a2dp::setup_codec` 会调它），只是**所在通路不可达** | 已验证 |
 | P1 跳转表内容 | 与报告**逐字节一致**；table[12]=0x5a → 错误分支 | 已验证（独立复算） |
@@ -623,7 +623,7 @@ ls: ...: No such file or directory
 
 ---
 
-## 9. 对"真正实现 LHDC V5 通路"的前置条件（基于本任务取证）
+## 9. 对"实现 LHDC V5 通路"的前置条件（基于本任务取证）
 
 按"是否可在不改 vendor 分区的前提下达成"分类：
 
@@ -654,7 +654,7 @@ ls: ...: No such file or directory
   `HalVersionManager` 的选择完全由 vendor 侧服务注册决定，**无运行时开关**。
 - 报告的**一处表述需修正**：AIDL 版 V5 代码不是"死代码"，而是"不可达通路上的活代码"。
   这带来一个方案含义：**若能让 `HalVersionManager` 选中 AIDL，V5 转换无需补丁即可工作**
-  （AIDL 表已正确路由 index 12，且 AIDL `A2dpLhdcv5ToHalConfig` 会填充真正的
+  （AIDL 表已正确路由 index 12，且 AIDL `A2dpLhdcv5ToHalConfig` 会填充
   `Lhdcv5Configuration`，而不是伪装成 V3）。
 - 但选中 AIDL 需要 vendor 侧提供实现库 + VINTF 声明 + 服务注册 ——
   **等价于要求厂商出固件**，与"不改挂载/不改 APEX"的约束不可兼容。

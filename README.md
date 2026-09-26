@@ -1,4 +1,4 @@
-# 真·LHDC V5 通路（xaga）
+# LHDC V5 通路（xaga）
 
 在 **Redmi Note 11T Pro（xaga / 天玑 8100 / MT6895）** 上，把 LHDC V5 从
 「被固件挡住」变成**开机即用的原生通路**：蓝牙协议栈改走 AIDL 传输层驱动音频 HAL，
@@ -40,7 +40,7 @@ G1–G3 可以打补丁，**G4 不行** —— 在 HIDL 链路上，"V5 配置"�
 协议栈内也已有对应的转换函数。栈在 `HalVersionManager` 里会**优先探测 AIDL 服务**，
 探测到就走 AIDL —— 此时 G2/G3/G4 一起消失。
 
-所以"真 V5"等价于一件事：**让协议栈探测到 AIDL 蓝牙音频服务**。
+所以"V5"等价于一件事：**让协议栈探测到 AIDL 蓝牙音频服务**。
 
 ---
 
@@ -157,7 +157,7 @@ adb shell su -c 'logcat -d -b all | grep LHDCV5A'
 ```
 
 完整的验证清单（含 PCM 速率实测方法、内存补丁字节核对、SHA256 磁盘未改校验）见
-[实现报告 §6](docs/LHDC-V5-真通路-实现报告.md)。
+[实现报告 §6](docs/LHDC-V5-通路-实现报告.md)。
 
 ---
 
@@ -216,8 +216,8 @@ xaga 上可用 —— 硬件 offload 通路（`MtkBTAudioProviderA2dpHW`）的 `
 │   └── zygisk-src/             Zygisk 补丁源码（C++，NDK 构建）
 ├── shim/                   shim 库源码（C++，NDK 构建）
 └── docs/
-    ├── LHDC-V5-真通路-实现报告.md      ← 成果、四道障碍与解法、码率、复现与验证
-    ├── LHDC-V5-真通路-前置条件分析.md  ← 可行性论证：HIDL/AIDL 边界的硬约束、固件实证
+    ├── LHDC-V5-通路-实现报告.md      ← 成果、四道障碍与解法、码率、复现与验证
+    ├── LHDC-V5-通路-前置条件分析.md  ← 可行性论证：HIDL/AIDL 边界的硬约束、固件实证
     ├── A2DP-FMQ缓冲-原理与改造.md      ← 专项：A2DP 软件通路 FMQ 环形缓冲的逆向与改造
     └── archive/                        调研过程记录（recon / design / process）
 ```
@@ -235,8 +235,8 @@ xaga 上可用 —— 硬件 offload 通路（`MtkBTAudioProviderA2dpHW`）的 `
 
 | 文档 | 内容 | 建议 |
 |---|---|---|
-| [实现报告](docs/LHDC-V5-真通路-实现报告.md) | 做了什么、怎么做的、遗留问题、复现步骤 | **先读这个** |
-| [前置条件分析](docs/LHDC-V5-真通路-前置条件分析.md) | 为什么只能这样做 | 关心技术原理时读 |
+| [实现报告](docs/LHDC-V5-通路-实现报告.md) | 做了什么、怎么做的、遗留问题、复现步骤 | **先读这个** |
+| [前置条件分析](docs/LHDC-V5-通路-前置条件分析.md) | 为什么只能这样做 | 关心技术原理时读 |
 | [A2DP FMQ 缓冲](docs/A2DP-FMQ缓冲-原理与改造.md) | 软件通路环形缓冲的逆向与字节级改造方案 | 专项深入 |
 | [archive/](docs/archive/README.md) | 8 路侦察报告、3 条候选路线设计、过程记录 | 追溯结论来源时读 |
 

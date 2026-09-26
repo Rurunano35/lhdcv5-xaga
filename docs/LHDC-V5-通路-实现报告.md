@@ -1,4 +1,4 @@
-# xaga 真·LHDC V5 通路实现报告
+# xaga LHDC V5 通路实现报告
 
 > 设备：Redmi Note 11T Pro（xaga / MT6895 / 天玑 8100）
 > 系统：Android 14 / HyperOS `OS2.0.12.0.ULOCNXM`
@@ -27,7 +27,7 @@ LHDC V5 在 xaga 上**以原生形态端到端跑通**，关键指标全部实�
 
 ---
 
-## 2. 为什么必须"真"—— 以及"真"到什么程度
+## 2. 为什么必须原生送达 —— 以及原生到什么程度
 
 ### 2.1 四道门禁
 
@@ -42,14 +42,14 @@ G1–G3 可用内存补丁绕过（旧方案的做法），但 **G4 是接口定
 只能"伪装"。这正是旧方案必须把 12 改写成 10 的原因，也是 `A2dpLhdcv5ToHalConfig` 在 HIDL 侧
 根本不存在的原因。
 
-### 2.2 唯一的真通路：AIDL
+### 2.2 唯一的通路：AIDL
 
 设备上的 MediaTek AIDL 实现 `vendor.mediatek.hardware.bluetooth.audio-impl.so`
 （白名单机型所带、xaga 缺失）**原生包含 `Lhdcv5Configuration`**，协议栈内也已存在
 对应的转换函数 `A2dpLhdcv5ToHalConfig`。栈在 `HalVersionManager` 里**优先探测 AIDL 服务**，
 探测到就走 AIDL —— 此时 V5 是原生支持的，G2/G3/G4 全部消失。
 
-因此"真 V5"等价于：**让 `HalVersionManager` 探测到 AIDL 蓝牙音频服务**。
+因此"V5"等价于：**让 `HalVersionManager` 探测到 AIDL 蓝牙音频服务**。
 
 ---
 
@@ -83,7 +83,7 @@ init: cannot execv(...): Permission denied
 `dlopen` 只需要 `read` + `mmap`，**不受 `execute` 限制**。
 
 于是写一个 **shim** 顶替该文件：
-1. `dlopen` 真正的 HIDL 实现（原名迁到 `/data/vendor/lhdcv5/real_hidl22.so`）并**转发 FETCH** —— 保证 HIDL 通路不回归；
+1. `dlopen` HIDL 实现（原名迁到 `/data/vendor/lhdcv5/real_hidl22.so`）并**转发 FETCH** —— 保证 HIDL 通路不回归；
 2. 借这次加载**点亮 AIDL**。
 
 ### 障碍 2 —— `mv` 替换 `/linkerconfig/ld.config.txt` 会卡开机
@@ -96,7 +96,7 @@ AIDL 实现与其依赖都在 `/data/vendor/lhdcv5/`，必须让厂商命名空�
 
 ```
 inode before: 5  →  inode after: 5      # 原地写入
-锚点行存在 ✓                              # 确认补丁真的插入过，不是空操作
+锚点行存在 ✓                              # 确认补丁插入过，不是空操作
 ```
 
 运行中测试也佐证：打完补丁后批量重启 8 个厂商服务，**0 失败** ——
@@ -324,7 +324,7 @@ LHDC V5 的档位上限就是 900 kbps（`LHDCV5_QUALITY_HIGH_900`），**192 kH
 （本机耳机在「高音质」档宣告 900 kbps）。**不覆盖耳机的宣告**——耳机只宣告 400 时，
 上限就保持 400。
 
-#### 5.5.1 真正的钳制链
+#### 5.5.1 钳制链
 
 ABR 卡在 400 是**三层**叠加的结果，缺一层都改不动；这也解释了此前「写后读回一致却无效」。
 
@@ -622,7 +622,7 @@ b    0x4c58
 24 + 20 = 44 字节，恰好填满宿主，且终点正好是 `.plt` 的第一个真实表项（`0x6750`，未改动）。
 站点处被覆盖的 `0x4f38` / `0x50a4` 不再被执行，字节原样保留。
 
-用 `[sp,#0x18]`（而不是全局索引）是关键：它是**按当前实际码率在表里比较出来的真档位**，
+用 `[sp,#0x18]`（而不是全局索引）是关键：它是**按当前实际码率在表里比较出来的档位**，
 不受补丁 4 的「索引退格」影响，所以 `tier-1` 一定是当前档位的下一格。
 
 写入顺序不能变（模块里的 `apply_abr_code_patches` 即按此实现）：
@@ -761,7 +761,7 @@ b    0x799674              ; 继续原 switch
   `MiuiHeadsetCodecSampleRateFragment` —— 点选时把值存进 SharedPreferences，
   A2DP 连上后自动调用它自己的 `setCodecInfo(保存值)` 重新下发。**走的是用户手动点选
   已验证有效的那条路径，不碰 stripped native 库**，风险最低。
-- **B. Zygisk 真正的持久化**：`mmap` 库内 3984 字节间隙作代码区 → hook
+- **B. Zygisk 持久化**：`mmap` 库内 3984 字节间隙作代码区 → hook
   `BtaAvCo::SetCodecUserConfig` 捕获用户选择并落盘 → hook `SetCodecOtaConfig`
   在协商后重新调用 `SetCodecUserConfig`。技术上可行，但要在 stripped 库里做两个
   inline hook 加文件 IO，工作量大、崩溃风险高。
@@ -842,10 +842,10 @@ UI 再读回来就是 96；而且用户越换值越换不动（旧值被反复�
 这样**用户主动改值时本模块完全透明**（跳板喂的值与原生 `mCodecUserConfig.sample_rate`
 本来就是同一个），只有重连协商时才由持久化值接管。这是「持久化偏好」与「锁死」的分界点。
 
-**第三个坑（锁死的真正原因）：字面量写错了地址。**
+**第三个坑（锁死的原因）：字面量写错了地址。**
 `sr_write_word(off, …)` 内部算的是 `g_sr_bias + off`，而传进去的 `kSrRateOff = 0x18`
 是**相对跳板宿主**的偏移，应该再补一个 `kSrHost`。于是运行时的分发值更新被写到了
-`bias + 0x18`（ELF 头的 `e_entry` 处），而跳板真正读的 `0xf3e078` 从来没人动过 ——
+`bias + 0x18`（ELF 头的 `e_entry` 处），而跳板读的 `0xf3e078` 从来没人动过 ——
 一直是**装跳板时按偏好文件写进去的那个值**。
 
 这个 bug 阴在：回读校验读的就是刚写进去的那 4 字节，所以它**每次都回报成功**，

@@ -10,7 +10,7 @@
 
 ## 结论 0（最重要）
 
-**在本设备（xaga）上，"真·LHDC V5 路径"对音频通路没有可观测收益。**
+**在本设备（xaga）上，"LHDC V5 路径"对音频通路没有可观测收益。**
 
 原因是一条已实证的调用链（见 §3）：软件编码模式下，BT 栈送给音频 HAL 的**只有 PCM 参数**，
 编解码器专用配置（含 V5 的 `Lhdcv5Configuration`）**根本不下发**——它只被用来做"是否走硬件卸载"的判定。
@@ -170,7 +170,7 @@ PCM 分支（0x825d48）：
 - `a2dp_get_selected_hal_codec_config()` 的产物在**软件模式**下只被 `IsCodecOffloadingEnabled()` 消费。
 - xaga 的 `persist.bluetooth.a2dp_offload.cap = sbc-aac`，日志亦确认为
   `A2DP_SOFTWARE_ENCODING_DATAPATH` → **永远走 PCM 分支**。
-- **所以"伪装成 V3"对 HAL 不可见；"真 V5"也不会改变 HAL 收到的任何字节。**
+- **所以"伪装成 V3"对 HAL 不可见；"V5"也不会改变 HAL 收到的任何字节。**
 
 ---
 

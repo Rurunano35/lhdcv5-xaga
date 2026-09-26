@@ -15,7 +15,7 @@
 |---|---|---|---|
 | a | `MiuiBluetooth/system/stack/a2dp/a2dp_vendor_lhdcv5.cc` 路径是否存在/能否找到仓库 | **路径存在**，但完整路径是 `vendor/mediatek/proprietary/packages/modules/MiuiBluetooth/system/stack/a2dp/a2dp_vendor_lhdcv5.cc`（MTK proprietary 树，非 AOSP）。**未在任何公开仓库找到该源码**（检索工具受限，见 §2.3） | 路径=已验证；公开性=未找到（不等于不存在） |
 | b | createCodec 白名单是否就是那 5 个 codename、有无遗漏 | **完全正确，恰好 5 个**：`corot` `duchamp` `zircon` `rothko` `malachite`。无第 6 个；5 个名字都以立即数（movz/movk）拼出，**在 `.rodata`/`.dynstr` 中零命中** | 已验证 |
-| c | 白名单门控什么？是"机型带 AIDL HAL"吗？ | 白名单**只门控 LHDC V5 codec 对象的创建**（`createCodec(12)` 返回 nullptr → V5 不进 codec 列表）。它是"本机带 MTK AIDL 蓝牙音频 HAL"的**静态代理**：真正的 HAL 代次判定在 `HalVersionManager` 里靠 `AServiceManager_checkService` 运行时探测，**代码上与 codename 零关联** | 已验证（代码路径）／推断（工程意图） |
+| c | 白名单门控什么？是"机型带 AIDL HAL"吗？ | 白名单**只门控 LHDC V5 codec 对象的创建**（`createCodec(12)` 返回 nullptr → V5 不进 codec 列表）。它是"本机带 MTK AIDL 蓝牙音频 HAL"的**静态代理**：HAL 代次判定在 `HalVersionManager` 里靠 `AServiceManager_checkService` 运行时探测，**代码上与 codename 零关联** | 已验证（代码路径）／推断（工程意图） |
 | d | 小米在 framework/services/APK 里是否也有 V5 门控 | **没有 V5 codec 门控**。Bluetooth.apk 里另有一份 codename 名单 `corot duchamp rothko degas malachite`，但用于 **Latency(LL) 模式**，且与 native 名单**不同**（`degas` ≠ `zircon`） | 已验证 |
 | e | MTK AIDL `vendor.mediatek.hardware.bluetooth.audio` 的定义 | 接口库在设备上（`-V1-ndk.so`），`Lhdcv5Configuration` 存在。字段布局、union tag、CodecType 取值本次从二进制反解（§6）。**公开 .aidl 未找到**；与 AOSP `android.hardware.bluetooth.audio` 是**并行两套独立接口**，不是替代 | 已验证（二进制）／公开性=未找到 |
 | f | 给 xaga 装上/伪造 AIDL 实现后，白名单还会拦住 V5 吗 | **会拦住**。`createCodec` 的判定是纯属性读取，发生在任何 HAL 交互之前；HAL 代次变化不会改变 `ro.product.name`，因此 V5 仍被丢弃。要跑通 V5 必须**同时**绕过白名单 | 已验证（调用链 + 代码结构） |
@@ -316,7 +316,7 @@ LHDCV5 : .rodata 4 hits (0x227e62, 0x2ada29, 0x2b3a33, 0x303104)
 
 同理 `a2dp_vendor_lhdcv3.cc` 的全局构造器（0x795ce0）对 `ro.product.device` 的 `corot` 判定把静态结构 `0xfdd220` 的 +6 字节设为 5（corot）/ 0xf（其它）—— xaga 走默认分支（与既有报告"xaga 的 LHDC V3 可用"一致）。
 
-### 4.5 HAL 代次的**真正**判定者：HalVersionManager（与 codename 无关）
+### 4.5 HAL 代次的判定者：HalVersionManager（与 codename 无关）
 
 **（1）判定逻辑**（`vendor::mediatek::bluetooth::audio::HalVersionManager` @0x861370，1284 B）：
 
@@ -592,7 +592,7 @@ vendor.mediatek.hardware.bluetooth.audio@2.2-impl.so  ← MTK HIDL 实现
 - `A2DP_VendorInitCodecConfigLhdcV5` @0x798da0 只是把静态能力表（`0xfdd238`）套进 `AvdtpSepConfig`，**无门控**。
 - 5 个 codename 的立即数在全库只出现于 §4.3 表所列函数；其中只有 `createCodec` 是准入性质。
 
-### 7.3 推论：真正"不伪装"跑通 V5 的前置条件（**推断**）
+### 7.3 推论："不伪装"跑通 V5 的前置条件（**推断**）
 
 要让 xaga 端到端跑通 LHDC V5 且**不改写 codec_type**（即不伪装成 V3），至少需要：
 

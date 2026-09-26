@@ -3,4 +3,4 @@ name=LHDC V5 Admission (xaga)
 version=v1.0
 versionCode=1
 author=xaga-lhdcv5
-description=解除 libbluetooth_jni.so 在 A2dpCodecConfig::createCodec 中对 ro.product.name 的机型白名单限制（xaga 不在 corot/duchamp/zircon/rothko/malachite 名单内，LHDC V5 会在编解码器创建阶段被丢弃）。纯内存补丁：只重定向一个 GOT 槽，不动 .text、不改跳转表、不改写 codec_type。与 lhdcv5aidl 模块配合，构成完整真·LHDC V5 通路。
+description=解除 libbluetooth_jni.so 在 A2dpCodecConfig::createCodec 中对 ro.product.name 的机型白名单限制（xaga 不在 corot/duchamp/zircon/rothko/malachite 名单内，LHDC V5 会在编解码器创建阶段被丢弃）。纯内存补丁：只重定向一个 GOT 槽，不动 .text、不改跳转表、不改写 codec_type。与 lhdcv5aidl 模块配合，构成完整 LHDC V5 通路。

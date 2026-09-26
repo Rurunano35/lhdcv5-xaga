@@ -538,7 +538,7 @@ I/droid.bluetooth: [INFO:hal_version_manager.cc(141)] HalVersionManager: aidl ve
 I/droid.bluetooth: [INFO:hal_version_manager.cc(155)] HalVersionManager: hidl vendor.mediatek.hardware.bluetooth.audio@2.2::IBluetoothAudioProvidersFactory
 ```
 
-> 注意：这两行是 **checkService 之前** 打印的「将要查询的名字」，**不能**据此判断选了哪个；真正的判据是后续 `strb` 写入。
+> 注意：这两行是 **checkService 之前** 打印的「将要查询的名字」，**不能**据此判断选了哪个；判据是后续 `strb` 写入。
 
 MTK 的探测顺序：**MTK AIDL(3) → MTK HIDL 2.2(2) → MTK HIDL 2.1(1) → [另一个 AIDL(4)] → AOSP HIDL 2.1/2.0**。
 （AOSP 名字 `android.hardware.bluetooth.audio@2.1/2.0::…` 只被 `bluetooth::audio::HalVersionManager` @0x87cb70 引用 —— 那是 AOSP 命名的另一份实现，与 MTK 的 @0x861370 并存；设备日志只出现 MTK 那份。）
@@ -572,7 +572,7 @@ $ adb shell su -c 'grep -n vendor.mediatek.hardware.bluetooth.audio /vendor/etc/
 337:        <version>2.2</version>
 ```
 
-→ **vendor 侧完全没有 AIDL 实现**，这是唯一真正的硬缺口。
+→ **vendor 侧完全没有 AIDL 实现**，这是唯一硬缺口。
 
 ---
 

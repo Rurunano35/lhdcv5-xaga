@@ -18,7 +18,7 @@
 | `R5-参考仓库-liblhdc-collections-分析.md` | 第三方 LHDC 仓库的作用边界（结论：只解决编码器层） |
 | `R6-设备实况核查.md` | 设备只读体检：属性、服务、库、进程映射等 |
 | `R7-bt-audio-hal-pipeline.md` | 蓝牙音频 HAL 管线地图（HIDL vs AIDL 的完整数据流） |
-| `R8-gap-analysis.md` | 真 V5 与伪装 V5 的差异清单（后经 V3 证伪，多数"差异"实为不存在） |
+| `R8-gap-analysis.md` | V5 与伪装 V5 的差异清单（后经 V3 证伪，多数"差异"实为不存在） |
 
 ## design/ —— 三条候选路线设计
 
@@ -26,7 +26,7 @@
 |---|---|---|
 | `D1-aidl-bridge.md` | 补上 AIDL 服务让栈切到 AIDL | **方向正确**，但当时评估为"收益低"，因为漏看了 MTK 版 session 库含 192 kHz |
 | `D2-own-vendor-hal.md` | 自建 HIDL 厂商 HAL | 否决（HIDL 语义下无法原生携带 V5）。**其中"移植大概率不能解锁 192kHz"的推断是错的**，被固件实证推翻 |
-| `D3-in-stack-v5.md` | 栈内提供真 V5 转换函数 | 否决（功能收益为零） |
+| `D3-in-stack-v5.md` | 栈内提供 V5 转换函数 | 否决（功能收益为零） |
 
 ## process/ —— 过程记录
 

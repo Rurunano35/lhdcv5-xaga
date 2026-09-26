@@ -22,7 +22,7 @@
 | d | 自建能否复刻整条链 | **能**。所有组件同进程、会话 API 稳定、AOSP 有完整参考实现 | 已验证 |
 | e | 能否"原生携带 V5" | **在 HIDL 2.x 公共语义下不可能**。`CodecSpecific` 恰好 5 个变体、无 `vendorConfig` 逃生口；`LhdcParameters` 仅 8 字节、无版本字段；线格式编译期冻结且两端共用 APEX 库。**只能做到"私有协议意义上的原生"**，而软件编码通路下它**零功能收益** | 已验证（逐指令） |
 | e2 | D2 的唯一实质收益 | **192 kHz 准入**：`IsSoftwarePcmConfigurationValid` 只被 provider 调用，自建 provider 可放宽；厂商 provider 显式拒绝 `0x10/0x20` | 已验证（逐指令） |
-| f | 总判定 | **技术可行、工程量大、收益极小**。若目标是"配置真正送到 HAL 不伪装"→ 伪需求（SW 通路 HAL 只收 PCM）；若目标是 **192 kHz** → 这是目前唯一可行路线 | — |
+| f | 总判定 | **技术可行、工程量大、收益极小**。若目标是"配置送到 HAL 不伪装"→ 伪需求（SW 通路 HAL 只收 PCM）；若目标是 **192 kHz** → 这是目前唯一可行路线 | — |
 
 ---
 
@@ -577,11 +577,11 @@ R2 已证：`命名空间含 hidl 且名字含 v5（不分大小写）的符号 
 
 | 方案 | 内容 | 判定 |
 |---|---|---|
-| **(i) 新 HIDL 包/版本 + 真 `Lhdcv5Parameters`** | 自己写 `.hal` + 接口库 + 实现 | 接口与 HAL 侧**我们可以做到**；但**栈不会去调**。必须再给栈打补丁实现一整套新客户端（`FetchAudioProvider_2_1` 等价物 + `a2dp_encoding` 分支）。工作量 ≫ P1/P2，收益 = 0。**不可行/无意义** |
+| **(i) 新 HIDL 包/版本 + 原生 `Lhdcv5Parameters`** | 自己写 `.hal` + 接口库 + 实现 | 接口与 HAL 侧**我们可以做到**；但**栈不会去调**。必须再给栈打补丁实现一整套新客户端（`FetchAudioProvider_2_1` 等价物 + `a2dp_encoding` 分支）。工作量 ≫ P1/P2，收益 = 0。**不可行/无意义** |
 | **(ii) 复用通用字段做隐式通道** | 例如 `encodedAudioBitrate`（uint32，通用）或 `LhdcParameters` 的 2 个空闲字节承载 V5 标记 | **技术上可行**（provider 与栈两端都被我们控制）。但 **没有任何消费者**：SW 通路下 provider 拿到 codec 配置后无事可做（HAL 不读 codec）。属于"自娱自乐的私有协议"。**可行但零收益** |
 | **(iii) 保留 `codec_type=12`、只把 `lhdcConfig` 换成 V5 语义** | 即"不伪装 V3" | HIDL 侧栈**根本没有 V5→HIDL 转换函数**（F5），要么新写（=方案 i），要么继续复用 V3 的转换函数 → **输出字节与现状完全相同**。**不可行/无收益** |
 
-### 6.3 ★ 唯一能被自建 provider 真正"原生解锁"的东西：192 kHz
+### 6.3 ★ 唯一能被自建 provider "原生解锁"的东西：192 kHz
 
 **证据 A — `IsSoftwarePcmConfigurationValid` 只被 provider 调用。**
 - 厂商 provider `hal22.so` 的 `A2dpSoftwareAudioProvider::startSession` @`0x1b2e4` 逐指令：
@@ -630,7 +630,7 @@ R2 已证：`命名空间含 hidl 且名字含 v5（不分大小写）的符号 
 |---|---|---|
 | ① provider 的 `IsSoftwarePcmConfigurationValid`（V2_1 版 @0x16e30） | pid 1006，**厂商 impl 库内** | **可以绕过**（自建 provider 跳过/放宽） |
 | ② `GetSoftwarePcmCapabilities` 能力常量（`0x3cf`，经 `getProviderCapabilities` 上报） | 同上 | 可绕过（自定义上报）——但**栈是否用它钳制协商速率：未验证**（本次扫描 `.text` 未发现 `GetAudioCapabilities_2_1` 的直接 `bl` 调用者） |
-| ③ `/vendor/etc/bluetooth_offload_audio_policy_configuration.xml` devicePort `samplingRates="44100 48000 88200 96000"` | audioserver | R7 §6.3 判为"回退/声明值，SW 通路非硬钳制"；**若真要 192 kHz 仍建议一并放宽（未实测）** |
+| ③ `/vendor/etc/bluetooth_offload_audio_policy_configuration.xml` devicePort `samplingRates="44100 48000 88200 96000"` | audioserver | R7 §6.3 判为"回退/声明值，SW 通路非硬钳制"；**若要 192 kHz 仍建议一并放宽（未实测）** |
 
 ---
 
@@ -642,7 +642,7 @@ R2 已证：`命名空间含 hidl 且名字含 v5（不分大小写）的符号 
 
 | 目标 | D2 是否必要 | 说明 |
 |---|---|---|
-| **A. "配置真正送到 HAL，不伪装 V3"** | ❌ 伪需求 | 软件编码通路下 HAL 只收 `pcmConfig`；V3/V5 送到 HAL 的字节**完全相同**（F1–F4 + §5.1 ②）。D2 做完也不改变任何一个字节 |
+| **A. "配置送到 HAL，不伪装 V3"** | ❌ 伪需求 | 软件编码通路下 HAL 只收 `pcmConfig`；V3/V5 送到 HAL 的字节**完全相同**（F1–F4 + §5.1 ②）。D2 做完也不改变任何一个字节 |
 | **B. 192 kHz** | ✅ **唯一有效路线** | 必须放宽 provider 侧的 `IsSoftwarePcmConfigurationValid`（§6.3） |
 | **C. 低延迟（LL）控制面** | ❌ 无效 | HIDL 接口/实现中 `setLatencyMode`/`LatencyMode` 计数 = 0（§3.5）。要 LL 只能走 AIDL，而 AIDL 侧 MTK 把 `isLowLatencyEnabled` 硬编码为 0（R8 D1） |
 | **D. 摆脱硬编码偏移（可维护性）** | ⚠️ 部分 | D2 让 HAL 侧不再依赖偏移，但**栈侧 P0/P1/P2 仍然依赖**（白名单 + 跳转表 + GOT）。D2 不能替代栈侧补丁 |
@@ -719,4 +719,4 @@ R2 已证：`命名空间含 hidl 且名字含 v5（不分大小写）的符号 
 
 ## 10. 一句话回答任务问题
 
-**可以自建一个 HIDL 厂商 HAL 实现并替换厂商的 @2.2 impl —— 机制上它只是"往 `/vendor/lib64/hw/` 里同名覆盖一个 .so"，零 VINTF、零 sepolicy、零新进程；但它在 HIDL 2.x 的公共语义下**不可能**原生携带 V5（`CodecSpecific` 恰好 5 个变体、无 `vendorConfig`、`LhdcParameters` 仅 8 字节无版本位、线格式冻结在 APEX 接口库里），而软件编码通路下 HAL 又只消费 PCM —— 所以这条路线对"真 V5 通路"是伪需求；它唯一真实的能力是**放宽 provider 内部的 `IsSoftwarePcmConfigurationValid`（厂商 provider 显式拒绝 176.4k/192k），从而让 192 kHz 走到会话层**。**
+**可以自建一个 HIDL 厂商 HAL 实现并替换厂商的 @2.2 impl —— 机制上它只是"往 `/vendor/lib64/hw/` 里同名覆盖一个 .so"，零 VINTF、零 sepolicy、零新进程；但它在 HIDL 2.x 的公共语义下**不可能**原生携带 V5（`CodecSpecific` 恰好 5 个变体、无 `vendorConfig`、`LhdcParameters` 仅 8 字节无版本位、线格式冻结在 APEX 接口库里），而软件编码通路下 HAL 又只消费 PCM —— 所以这条路线对"V5 通路"是伪需求；它唯一真实的能力是**放宽 provider 内部的 `IsSoftwarePcmConfigurationValid`（厂商 provider 显式拒绝 176.4k/192k），从而让 192 kHz 走到会话层**。**

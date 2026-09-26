@@ -1,4 +1,4 @@
-# R8 — "真·V5 通路"的语义边界 + 当前伪装（V5→V3）的实质缺陷清单
+# R8 — "V5 通路"的语义边界 + 当前伪装（V5→V3）的实质缺陷清单
 
 > 取证对象：`d:/Cache/Hyperos/xaga-lhdcv5/artifacts/libs/`（设备侧同名文件 SHA256 已由 R3 逐一对撞）
 > 设备：Redmi Note 11T Pro (xaga / MT6895) / HyperOS `OS2.0.12.0.ULOCNXM` / Android 14 / KernelSU
@@ -16,7 +16,7 @@
 | 问题 | 结论 |
 |---|---|
 | (丙) "让 HAL 原生携带 V5 信息"有实际收益吗？ | **没有**。软件编码通路上，HAL 只消费 `pcmConfig` 的三个字段，编解码器配置（无论 V3 的 `lhdcConfig` 还是 V5 的 `Lhdcv5Configuration`）**从不参与任何判定**。已用三层独立证据验证 |
-| 那"真·V5"到底有什么可做的？ | 只有 **两项**：(丁-1) **低延迟控制面**（HIDL 通路完全缺失，已定位到具体 no-op 分支）；(丁-2) **摆脱硬编码偏移**（稳定性） |
+| 那"V5"到底有什么可做的？ | 只有 **两项**：(丁-1) **低延迟控制面**（HIDL 通路完全缺失，已定位到具体 no-op 分支）；(丁-2) **摆脱硬编码偏移**（稳定性） |
 | 伪装造成了音质/功能损失吗？ | **没有**。采样率/位深/声道/码率/AR/JAS/lossless/META 全部在 stack+encoder 层，与 P1/P2 无关 |
 | 192 kHz 是伪装造成的吗？ | **不是**。三道闸门全部在 HAL/策略侧；栈侧（含 V3 转换函数）**允许 0x20 原样透传**，且 A2DP 层**实测已协商成功过 192000** |
 | 附录 D 的两条"未走通"方向 | ① 已在当前实现中走通，当时判断基于一个**错误前提**（"HAL LHDC 上限 88200"不存在）；② 方向本身可行，只是被误判为"无意义" |
@@ -50,7 +50,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 ---
 
-## 2. 任务 1 — "真正实现 LHDC V5 路径"的四种语义界定
+## 2. 任务 1 — "实现 LHDC V5 路径"的四种语义界定
 
 ### 2.1 四种含义
 
@@ -60,7 +60,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 | **乙** | **编码器层**：实际调用 V5 编码器（`liblhdcv5BT_enc.so` / `LHDC_V5-5.0.5`）产出码流 | `lhdcv5_encoder_new` / `lhdcv5BT_init_encoder: success!` + PCM 速率实测 | **已达成** |
 | **丙** | **HAL 接口层**：送到音频 HAL 的配置结构**原生**是 V5 结构（`Lhdcv5Configuration`），不做 12→10 改写 | 栈侧存在 HIDL 版 `A2dpLhdcv5ToHalConfig`，或 HAL 侧出现 `Lhdcv5Configuration` | **未达成，且达成后也无收益（见 §2.3）** |
 | **丁** | **其他**（本任务发掘，共 3 项） | | |
-| 丁-1 | **低延迟（LL）控制面**：框架↔HAL 之间"允许低延迟 / 切换延迟模式"的协议 | 栈侧 `set_audio_low_latency_mode_allowed` 在 HIDL transport 下是否真的下发 | **HIDL 下是 no-op（已验证，见 §3.3）** |
+| 丁-1 | **低延迟（LL）控制面**：框架↔HAL 之间"允许低延迟 / 切换延迟模式"的协议 | 栈侧 `set_audio_low_latency_mode_allowed` 在 HIDL transport 下是否下发 | **HIDL 下是 no-op（已验证，见 §3.3）** |
 | 丁-2 | **摆脱对硬编码偏移的依赖**：不依赖具体 APEX 构建的字节偏移 | 是否存在符号/特征定位而非固定偏移 | **未达成（见 §3.8）** |
 | 丁-3 | **192 kHz** | 端到端 192 kHz PCM 通路 | **未达成，但与伪装无关（见 §3.6）** |
 
@@ -112,7 +112,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 ### 2.4 有实际收益的是哪一项
 
-**只有 丁-1（LL 控制面）与 丁-2（稳定性）**。丁-3（192 kHz）虽是真需求，但**不是通过"V5 化"实现的**，而是需要改 HAL 会话库 + 音频策略（见 §3.6）。
+**只有 丁-1（LL 控制面）与 丁-2（稳定性）**。丁-3（192 kHz）虽是需求，但**不是通过"V5 化"实现的**，而是需要改 HAL 会话库 + 音频策略（见 §3.6）。
 
 ---
 
@@ -190,7 +190,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 > 另：设备当前 `dumpsys bluetooth_manager` 显示 `a2dp_source_offload_capability_mask: 0`，且 `persist.bluetooth.a2dp_offload.cap` **实测为空**（报告称 `sbc-aac`，与当前 boot 不符 —— 见 §6 修正表）。
 
-### 3.3 候选：低延迟（LL）模式是否丢失？ → **★ 真差异（HIDL 通路缺控制面）**
+### 3.3 候选：低延迟（LL）模式是否丢失？ → **★ 差异（HIDL 通路缺控制面）**
 
 **这是本次最重要的新发现。**
 
@@ -241,7 +241,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 即 **AIDL 的 PCM 结构里 LL 标志被硬编码为 0**（AIDL 侧改走 `setLatencyMode` 控制面）。
 
-> **判定（已验证）**：**LL 是本机型上"真·V5"唯一真实的功能缺口，但它是 HIDL transport 的结构性缺口，不是"伪装 V3"造成的**。
+> **判定（已验证）**：**LL 是本机型上"V5"唯一真实的功能缺口，但它是 HIDL transport 的结构性缺口，不是"伪装 V3"造成的**。
 > 换成原生 V5（若存在 HIDL 版转换函数）**同样拿不到 LL**。
 > 而且 Java 侧还有一道独立的机型门禁：`MiuiBluetoothLatencyMode` 的名单 `{corot, duchamp, rothko, degas, malachite}` **不含 xaga**（R4 §5.1，`String.indexOf(ro.product.device)`），LL 开关在 UI 层即不可达。
 
@@ -276,7 +276,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 > **结论**：AR / LARC / JAS / META / lossless / VBR / ABR **全部是 A2DP 信令层 + 编码器层**的概念（R5 notes §0：V5 配置面是"逐参数传递 + 带外扩展 API"，**没有**配置大结构体）。
 > **在软件编码通路上，一个都不需要 HAL 知晓。** 只有"硬件卸载（offload）"才需要把 codec 配置交给 DSP —— 而本机 `persist.bluetooth.a2dp_offload.cap` 为空、`device_features/xaga.xml` 的 `support_lhdc=false`、HAL 也**没有** LHDC offload 分支（`IsOffloadCodecConfigurationValid` 对 codecType=32 无条件放行但 `lhdcConfig` 无分支，R3 §3.1）。
 
-### 3.6 候选：192 kHz 是否真的被平台策略钳死？ → **是，但不止策略；且与伪装无关**
+### 3.6 候选：192 kHz 是否被平台策略钳死？ → **是，但不止策略；且与伪装无关**
 
 **三道闸门（本次逐条复核，含确切文件与行）**：
 
@@ -296,7 +296,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 > **判定**：192 kHz **确实不可达**，但**不是"被平台策略钳死"**这么单一 —— 决定性的是 HAL 会话库的掩码；策略是第二道。**两者都在 `/vendor`，与伪装方案无关。**
 
-### 3.7 候选：`isLLSupported` 字段从未被填写 → **真差异（但无功能影响）**
+### 3.7 候选：`isLLSupported` 字段从未被填写 → **差异（但无功能影响）**
 
 **对 R3 的修正**：`LhdcParameters` 不是 4 字段，而是 **5 字段 / 8 字节**：
 
@@ -375,11 +375,11 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 ---
 
-## 5. 任务 4 —「真·V5 与伪装 V5 的差异清单」
+## 5. 任务 4 —「V5 与伪装 V5 的差异清单」
 
-> **总纲**：在 **xaga + HIDL + 软件编码** 这个具体组合下，"真·V5"与"伪装 V5"在**音频数据面上逐字节等价**。下表把所有差异项按"是否真的有差异"分类。
+> **总纲**：在 **xaga + HIDL + 软件编码** 这个具体组合下，"V5"与"伪装 V5"在**音频数据面上逐字节等价**。下表把所有差异项按"是否有差异"分类。
 
-### 5.1 真正存在差异的项（3 项）
+### 5.1 存在差异的项（3 项）
 
 | # | 差异项 | 影响面 | 证据强度 | 要实现它必须改动哪一层 | 实际收益 |
 |---|---|---|---|---|---|
@@ -399,7 +399,7 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 | E6 | AR / JAS / lossless / META 丢失 | 功能 | **无差异** —— 全部是 A2DP CIE 解析 + encoder API，8 个 `A2DP_Vendor*LhdcV5` 特性函数均只读 `p_codec_info` | `0x79beb0` 全文 |
 | E7 | 192 kHz 被伪装阻断 | 音质 | **无差异（但也不可达）** —— 栈侧允许 0x20 且实测协商出 192000；阻断在 HAL 会话掩码 + 策略 | §3.6 三闸门 |
 
-### 5.3 若要"真·V5"（不伪装）的**最小充分改动集**
+### 5.3 若要"V5"（不伪装）的**最小充分改动集**
 
 按"是否第三方可达"分类：
 
@@ -468,8 +468,8 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -i -E "offload|codecName"'
 
 - `Lhdcv5Configuration`（MTK AIDL）11 个标量的**字段名**（二进制不可恢复；公开 `.aidl` 未找到）。
 - AIDL `PcmParameters` 里是否存在 MTK 私有的 LL 字段（本次只确认 HIDL 版有 `isLowLatencyEnabled`）。
-- `A2dpCodecConfigLhdcV5Base::setCodecConfig`（8560 B）中 `codec_specific_2` bit0 的**写入路径**（即"LL 使能时该位是否真的被置 1"）—— 未逐指令追踪。
-- 把 `IsSoftwarePcmConfigurationValid` 掩码与策略放开后，192 kHz 是否真能出声（未做实验；本任务只读）。
+- `A2dpCodecConfigLhdcV5Base::setCodecConfig`（8560 B）中 `codec_specific_2` bit0 的**写入路径**（即"LL 使能时该位是否被置 1"）—— 未逐指令追踪。
+- 把 `IsSoftwarePcmConfigurationValid` 掩码与策略放开后，192 kHz 是否能出声（未做实验；本任务只读）。
 - 日志中 `encodedAudioBitrate = 9999999` 的来源（疑似"未知码率"哨兵；与伪装无关，`getTrackBitRate` 不经过被钩子的 `getCodecConfig`）。
 
 ---

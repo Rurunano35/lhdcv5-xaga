@@ -1,7 +1,7 @@
 # R7 — Android 蓝牙音频 HAL「管线工程」调查（平台知识 + xaga 映射）
 
 > 调查日期：2026-09-25
-> 目标：搞清楚 Android 14 上「新增/替换一个蓝牙音频 HAL 实现」需要动哪些系统组件，作为判断各条「真 V5」路线可行性的基础。
+> 目标：搞清楚 Android 14 上「新增/替换一个蓝牙音频 HAL 实现」需要动哪些系统组件，作为判断各条「V5」路线可行性的基础。
 > 设备：Redmi Note 11T Pro (xaga / MT6895) / Android 14 / HyperOS OS2.0.12.0.ULOCNXM / KernelSU root
 > 方法：android.googlesource.com `?format=TEXT` 原文落盘（`reference/aosp-src/r7/`）+ 设备只读 adb + 拉取的 CIL 策略本地解析
 > **本报告只做只读操作**（临时 cp 到 `/data/local/tmp` 的两个 .cil 已 `rm` 清理）
@@ -19,7 +19,7 @@
 | 5 | A14 栈侧的 AIDL 探测是 `AServiceManager_isDeclared` + `AServiceManager_waitForService` + `getProviderCapabilities`；`getInterfaceVersion` 只在 A14 **QPR3 及以后**的 HalVersionManager 里出现；**`getSupportedProfiles` 在 A14 与 main 分支都不存在**（AIDL factory 只有 `getProviderCapabilities`/`openProvider` 两个方法） | 已验证（diff 无差异） |
 | 6 | 软件编码（`A2DP_SOFTWARE_ENCODING_DATAPATH`）下 **HAL 侧只收 PCM**：`setup_codec()` 只在 offload 分支下发 codecConfig，SW 分支只发 `pcmConfig`。**独立复核确认 MAIN-findings §3 成立** | 已验证（AOSP 源码 + 设备反汇编） |
 | 7 | `openOutputStream` 失败的判定点：`adev_open_output_stream()` → `SetUp()` → `IsSessionReady()` 为假 → 返回 `-EINVAL`；framework 侧 `AudioHwDevice::openOutputStream()` 打印 `HAL returned sampleRate 0, Format 0, channelMask 0, status -22`；APM 打印 `openOutputWithProfileAndDevice failed to open output -19` | 已验证（源码 + 日志逐字对上） |
-| 8 | **采样率上限不在 audio_policy_configuration.xml 里钳制**：BT module 的 `a2dp output` mixPort 在本机**没有任何 `<profile>`** → APM 视其为动态 profile，用 `getParameters(keyStreamSupportedSamplingRates)` 向 HAL 查询，BT module 由会话 PCM 配置回答（`out_get_parameters` → `LoadAudioConfig`）。日志实证：先以 `SamplingRate 0` 打开，再以 `SamplingRate 96000` 重开。真正的拒绝发生在 vendor session 库 `IsSoftwarePcmConfigurationValid` | 已验证 |
+| 8 | **采样率上限不在 audio_policy_configuration.xml 里钳制**：BT module 的 `a2dp output` mixPort 在本机**没有任何 `<profile>`** → APM 视其为动态 profile，用 `getParameters(keyStreamSupportedSamplingRates)` 向 HAL 查询，BT module 由会话 PCM 配置回答（`out_get_parameters` → `LoadAudioConfig`）。日志实证：先以 `SamplingRate 0` 打开，再以 `SamplingRate 96000` 重开。拒绝发生在 vendor session 库 `IsSoftwarePcmConfigurationValid` | 已验证 |
 | 9 | 本机**不存在** `libbluetooth_audio_session_aidl.so`（APEX 与 /vendor 全无，只有 HIDL 版 `libbluetooth_audio_session.so` 与 `libbluetooth_audio_session_mediatek.so`）→ 走 AIDL 路线必须自带该库 + AIDL provider 实现 + AIDL-aware 的 `audio.bluetooth.default.so` | 已验证 |
 | 10 | 「不新增服务」的替代做法里，**hook 厂商 HAL 的 setCodecConfig 对 SW 通路零收益**（HAL 根本不看 codec）；唯一有意义的仍是栈内补丁（现有 P0/P1/P2） | 已验证（源码+反汇编） |
 
@@ -292,7 +292,7 @@ bool BluetoothAudioClientInterface::is_aidl_available() {
   auto provider_factory = IBluetoothAudioProviderFactory::fromBinder(
       ::ndk::SpAIBinder(AServiceManager_waitForService(kDefaultAudioProviderFactoryInterface.c_str())));
 ```
-→ **`isDeclared` 才是 AIDL 服务能否被真正使用的闸门**（它查 VINTF manifest），`checkService` 只影响版本选择。两者**都要满足**。
+→ **`isDeclared` 才是 AIDL 服务能否被使用的闸门**（它查 VINTF manifest），`checkService` 只影响版本选择。两者**都要满足**。
 
 ---
 
@@ -398,7 +398,7 @@ E/AudioFlinger(11326): loadHwModule() error -22 loading module a2dp       ← �
 
 `setup_codec()` 的 SW 分支**从不把 codec 配置发给 HAL**；`codecConfig` 只用于 `IsCodecOffloadingEnabled()` 判定。
 → 对 HAL 而言，「V5 伪装成 V3」与「原生 V5」**逐字节相同**（MAIN-findings §3 独立复核成立）。
-→ 「让 HAL 支持 V5」在 SW 通路下是**伪需求**；真正的缺口只在**栈侧**（HIDL 无 V5 转换函数）。
+→ 「让 HAL 支持 V5」在 SW 通路下是**伪需求**；缺口只在**栈侧**（HIDL 无 V5 转换函数）。
 
 ---
 
@@ -475,12 +475,12 @@ E/AudioFlinger(11326): loadHwModule() error -22 loading module a2dp       ← �
 
 ### 6.3 采样率上限在哪一层钳制（★ 对 R3 的细化）
 
-| 层 | 机制 | 是否真的钳制 |
+| 层 | 机制 | 是否钳制 |
 |---|---|---|
 | L1 `/vendor/etc/audio_policy_configuration.xml` | mixPort/devicePort 的 `samplingRates`、`encodedFormats` | **不是硬钳制**。本机 BT module 的 `a2dp output` mixPort **无 profile** → APM 认为是**动态 profile**，转而向 HAL 查询（见下）。devicePort 的 `samplingRates` 只作为 `devDesc->getAudioProfiles()` 的**回退值**（`updateAudioProfiles()` 里 `repliedParameters.get(...) != NO_ERROR` 分支） |
 | L2 音频 HAL module（`audio.bluetooth.default.so`） | `LoadAudioConfig()` 直接把会话里的 `pcmConfig.sampleRateHz` 抄进 `config->sample_rate`（`device_port_proxy.cc:336-372` 原文，**无任何 clamp**）；`out_set_sample_rate()` 若与当前不同则返回 -1 | **不钳制**，只**上报** |
 | L2' 同 module 的 `out_get_parameters()` | `AUDIO_PARAMETER_STREAM_SUP_SAMPLING_RATES` 返回**会话 PCM 配置的那一个值**（`stream_apis.cc:425-470` 原文，硬编码比较 16000…192000 只是格式化） | 这是 APM 实际采信的来源 |
-| L3 vendor session 库 `libbluetooth_audio_session_mediatek.so` | `IsSoftwarePcmConfigurationValid(_2_1)` 掩码 `{0x1,0x2,0x4,0x8,0x40,0x80}`，`GetSoftwarePcmCapabilities_2_1` 常量 `0x3cf` | **真钳制**（R3 §8 已取证，本次未重复） |
+| L3 vendor session 库 `libbluetooth_audio_session_mediatek.so` | `IsSoftwarePcmConfigurationValid(_2_1)` 掩码 `{0x1,0x2,0x4,0x8,0x40,0x80}`，`GetSoftwarePcmCapabilities_2_1` 常量 `0x3cf` | **钳制**（R3 §8 已取证，本次未重复） |
 | L4 BT 栈 | 协商出的 codec sample rate（`A2dpCodecToHalSampleRate`） | 源头 |
 
 **日志实证（L1/L2 关系）**：
@@ -494,8 +494,8 @@ I/AudioFlinger: openOutput() … module 18 Device AUDIO_DEVICE_OUT_BLUETOOTH_A2D
 **96000 不是从 XML 读出来的，是 HAL 报出来的。**
 
 > 对 R3 的修正建议：R3 §8.1 把「音频策略 samplingRates 上限 96000」列为闸门①。本次证据表明，
-> 在**软件编码通路**上它是**回退值/声明值**，不是生效的钳制点；真正会挡住 192 kHz 的是 L3（session 库掩码）
-> 与 L2'（HAL 只上报协商值，APM 不会凭空放宽）。若真要跑 192 kHz，改 XML 是**必要但不充分**的，
+> 在**软件编码通路**上它是**回退值/声明值**，不是生效的钳制点；会挡住 192 kHz 的是 L3（session 库掩码）
+> 与 L2'（HAL 只上报协商值，APM 不会凭空放宽）。若要跑 192 kHz，改 XML 是**必要但不充分**的，
 > 且必须先过 L3。
 
 ### 6.4 其他 XML 影响面
@@ -583,7 +583,7 @@ I/AudioFlinger: openOutput() … module 18 Device AUDIO_DEVICE_OUT_BLUETOOTH_A2D
 │  └── /vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio@2.2-impl.so    │
 │  │     provider: startSession(hostIf, AudioConfiguration) → 建 FMQ           │
 │  └── /vendor/lib64/libbluetooth_audio_session_mediatek.so  [只读, 可挂载]      │
-│        ├─ IsSoftwarePcmConfigurationValid  ← ★采样率真闸门                    │
+│        ├─ IsSoftwarePcmConfigurationValid  ← ★采样率闸门                    │
 │        └─ 进程内会话单例（provider 与 module 必须同进程）                     │
 └───────────────┬─────────────────────────────────────────────────────────────┘
                 │ hwbinder: startSession / startStream / suspendStream
@@ -697,4 +697,4 @@ d:/Cache/Hyperos/lhdcv5-tr/analysis/raw/
 
 **Android 14 上「新增/替换一个蓝牙音频 HAL 实现」不是"加一个 .so"那么简单**：HIDL 要求 VINTF manifest 声明 + `hwservice_contexts` 条目 + `hwservice_manager add` 权限；AIDL 要求 `service_contexts` 条目（服务名决定）+ `service_manager add` 权限 + `isDeclared` 可见的 manifest 条目；两者都要与**音频 HAL 服务同进程**才能让进程内会话单例/FMQ 工作。
 **本机（xaga）的硬缺口依次是**：① `libbluetooth_audio_session_aidl.so` 不存在；② MTK AIDL 服务名无 service_contexts 条目（SELinux 会拒注册）；③ `audio.bluetooth.default.so` 是 HIDL-only；④ 厂商 HIDL 接口无 V5 结构。
-而**这四条全都无法带来实际收益** —— 因为软件编码通路下 HAL 只消费 PCM，V5 与 V3 送到 HAL 的字节完全相同。**结论：现有「V5 伪装 V3」的内存补丁方案已经是该设备上最优解；"真 V5 通路"是伪需求。**
+而**这四条全都无法带来实际收益** —— 因为软件编码通路下 HAL 只消费 PCM，V5 与 V3 送到 HAL 的字节完全相同。**结论：现有「V5 伪装 V3」的内存补丁方案已经是该设备上最优解；"V5 通路"是伪需求。**

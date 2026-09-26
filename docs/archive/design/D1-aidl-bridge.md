@@ -350,7 +350,7 @@ BT 栈 ◀──AIDL 返回 MQDescriptor（同一 ashmem 区域）────�
 - **残留风险（中等）**：FMQ 的 grantor / event-flag 语义在跨描述符重打包时是否完整保留 —— 需要真机验证。
   缓解：优先用 libfmq 自身的构造路径（`AidlMessageQueue` 从 fd 构造），而不是手写 parcel。
 
-### 2.5 复核：AIDL 通路里 codec_type=12 真的被正确路由（无需任何补丁）
+### 2.5 复核：AIDL 通路里 codec_type=12 被正确路由（无需任何补丁）
 
 我自己解码了两张跳转表（`scripts/d1/d1_table.py`）：
 
@@ -554,7 +554,7 @@ $ adb shell su -c "ps -A -o PID,ETIME,NAME | grep -E '(^ *1 |com.android.bluetoo
 | R1 "未知：`0xff42c0` 第二个 AIDL 探测的服务名" | ✅ **已解析**：`android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default`（GOT 0xf8e898 = AOSP descriptor） |
 | R1 §(g)#3 "VINTF 声明：数据通路必需（版本选择不需要）" | ✅ **成立且更强**：`addService` **本身**也要求 VINTF 声明（`meetsDeclarationRequirements`），不只是客户端 `isDeclared` |
 | R1 §(h) "vendor 侧需实现什么：…`audio.bluetooth.default.so` 必须支持 AIDL 版本的 session 接口" | ⚠ **修正**：**不需要**。纯转发 shim 下 FMQ 仍由 HIDL provider 在 pid 1006 创建并进程内交给现有 HIDL-only module；module 无需任何改动 |
-| R7 §3.3 "`isDeclared` 才是 AIDL 服务能否被真正使用的闸门" | ✅ **成立**，且失败模式已精确到日志行：`a2dp_encoding_aidl.cc:462` `init: BluetoothAudio AIDL implementation does not exist`（`0x8623d0`） |
+| R7 §3.3 "`isDeclared` 才是 AIDL 服务能否被使用的闸门" | ✅ **成立**，且失败模式已精确到日志行：`a2dp_encoding_aidl.cc:462` `init: BluetoothAudio AIDL implementation does not exist`（`0x8623d0`） |
 | R7 §3.2 "MTK 名注册会被 SELinux 拒" | ✅ **成立且更强**：`default_android_service` 在 plat+vendor CIL 中**连 `find` 的 allow 规则都没有**，不只 `add` |
 | R2 §"AIDL MTK 表 0x2c577d [12]→V5" | ✅ **独立复算一致**（bytes `00 34 39 39 43 48 48 48 48 5e 3e 48 3e 00 34`） |
 | R2/R4 "白名单与 HAL 代次解耦" | ✅ **独立复核一致**（`ro.product.name` 全库 2 个 xref） |
@@ -592,7 +592,7 @@ $ adb shell su -c "ps -A -o PID,ETIME,NAME | grep -E '(^ *1 |com.android.bluetoo
 - AIDL FMQ 跨描述符重打包后 grantor / event-flag 语义是否完整
 - 手搓非 VINTF binder 时 libbinder stability 检查的实际行为
 - MTK AIDL parcelable 的字段名（`Lhdcv5Configuration` 等，二进制不可恢复）
-- AIDL 通路下 `setLowLatencyModeAllowed` 是否真能打通 LL（R8 曾实测 MTK AIDL 的 PCM 分支把 `isLowLatencyEnabled` 硬编码为 0）
+- AIDL 通路下 `setLowLatencyModeAllowed` 是否能打通 LL（R8 曾实测 MTK AIDL 的 PCM 分支把 `isLowLatencyEnabled` 硬编码为 0）
 
 ---
 

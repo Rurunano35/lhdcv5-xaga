@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# LHDC V5 AIDL 真通路 —— 开机自动生效
+# LHDC V5 AIDL 通路 —— 开机自动生效
 #
 # 目标：让蓝牙协议栈走 AIDL 传输层，从而：
 #   - LHDC V5 以 codec_type=12 原生送达 HAL（不再伪装成 V3）
 #   - 解锁 192 kHz（软件 PCM 采样率上限由策略放开）
 #
-# 完整说明见 docs/LHDC-V5-真通路-实现报告.md。四道已排除的障碍简述：
+# 完整说明见 docs/LHDC-V5-通路-实现报告.md。四道已排除的障碍简述：
 #   1. 本机 SELinux 禁止 init exec 任何 bind-mount 回来的可执行文件
 #      （execute_no_trans denied）→ 因此不替换音频 HAL 服务二进制，
 #      改为用一个 shim 顶替它本来就会 dlopen 的 HIDL 实现库

@@ -5,7 +5,7 @@
 // 原理：HIDL 的 registerPassthroughServiceImplementation 会 dlopen 这个文件并
 // 查找 HIDL_FETCH_IBluetoothAudioProvidersFactory。音频 HAL 服务（PID 1006 /
 // mtk_hal_audio 域）在启动时会做这件事 —— 本 shim 借这个时机：
-//   1) dlopen 真正的 HIDL 实现并转发 FETCH，保证 HIDL 通路不回归；
+//   1) dlopen HIDL 实现并转发 FETCH，保证 HIDL 通路不回归；
 //   2) dlopen MediaTek 的 AOSP-AIDL 实现 —— 它靠静态构造函数自注册为
 //      android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default，
 //      从而让蓝牙协议栈切到 AIDL 通路（进而解锁 192 kHz）。

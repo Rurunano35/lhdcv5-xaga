@@ -48,7 +48,7 @@ ADB="d:/Cache/Hyperos/platform-tools/adb.exe"
 
 ## 2. (a) 逐目录说明
 
-### 2.1 `AOSP/liblhdcv5/` — ★ 与"真 V5 编码通路"最相关
+### 2.1 `AOSP/liblhdcv5/` — ★ 与"V5 编码通路"最相关
 
 | 文件 | 大小 | 性质 |
 |---|---|---|
@@ -253,7 +253,7 @@ lhdcv5BT.h 声明 = 15; 设备 glue 导出 = 15
 
 #### ★ 最重要的发现：**V5 没有"配置大结构体"**
 
-`lhdcv5_api.h` 里**只有一个 struct**（`lhdcv5_abr_para_t`），且它是 **ABR/VBR 的运行时统计/状态**，不是用户配置。真正的配置是**逐标量参数**传的：
+`lhdcv5_api.h` 里**只有一个 struct**（`lhdcv5_abr_para_t`），且它是 **ABR/VBR 的运行时统计/状态**，不是用户配置。配置是**逐标量参数**传的：
 
 ```c
 extern int32_t lhdcv5_util_init_encoder
@@ -629,7 +629,7 @@ P10[7]=LLESSRaw48K
 VendorId=0x0000053A  CodecId=0x4C35  CODEC_LEN=13 → CIE_LEN=11
 ```
 
-**无价值的**：`lhdcv5_util_dec.c`（README 明说是正弦波占位："仅具备模拟解码的能力…用真正的LHDCV5解码算法替换其中的正弦波（模拟解码）部分"）、`a2dp_vendor_lhdcv5_decoder.c`（解码通路）。
+**无价值的**：`lhdcv5_util_dec.c`（README 明说是正弦波占位："仅具备模拟解码的能力…用 LHDCV5解码算法替换其中的正弦波（模拟解码）部分"）、`a2dp_vendor_lhdcv5_decoder.c`（解码通路）。
 
 > 重要：**CIE 布局只决定"能不能协商成 V5"，不决定"配置能不能送到音频 HAL"**。后者是 Android 独有的 HIDL/AIDL 问题，ESP-IDF 完全没有这个概念（ESP32 没有 Android 音频 HAL）。
 
@@ -703,7 +703,7 @@ vendor.mediatek.hardware.bluetooth.audio @2.2 ::IBluetoothAudioProvidersFactory/
 | `/vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio@2.2-impl.so`（**设备真实实现**） | **0** | ✅ `.lhdcConfig = ` |
 | `hl_vendor.mediatek.hardware.bluetooth.audio-V1-ndk.so`（**AIDL 接口，在 APEX 里**） | ✅ `Lhdcv5Configuration` + `Lhdcv5Capabilities` + `Lhdcv2Configuration` | — |
 
-→ **AIDL 接口定义存在（在 APEX 中随协议栈分发），但设备厂商的 HAL 实现是 HIDL 且只认 `lhdcConfig`。这是真·V5 通路的唯一硬阻断，参考仓库对此零帮助。**
+→ **AIDL 接口定义存在（在 APEX 中随协议栈分发），但设备厂商的 HAL 实现是 HIDL 且只认 `lhdcConfig`。这是 V5 通路的唯一硬阻断，参考仓库对此零帮助。**
 
 ---
 
@@ -711,7 +711,7 @@ vendor.mediatek.hardware.bluetooth.audio @2.2 ::IBluetoothAudioProvidersFactory/
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  真·LHDC V5 通路需要 4 层                                            │
+│  LHDC V5 通路需要 4 层                                            │
 ├──────────────────────────────────────────────────────────────────────┤
 │  L4  音频 HAL 传输   Lhdcv5Configuration (AIDL)  ── ✗ 设备缺厂商实现  │ ← 仓库 0 帮助
 │  L3  蓝牙协议栈      a2dp_vendor_lhdcv5.cc        ── ✓ 设备已有(内嵌) │ ← 仓库 0 帮助（但设备已具备）
@@ -728,7 +728,7 @@ vendor.mediatek.hardware.bluetooth.audio @2.2 ::IBluetoothAudioProvidersFactory/
 4. **A2DP 能力声明（CIE）的完整字节布局**：`a2dp_vendor_lhdcv5_constants.h` —— 协商层可用。
 5. **V5 解码原理的详细逆向文档**：README §3（帧头/解扰/SNS/FAC-Rice/反量化/IMDCT），可用于码流自检。
 
-### 8.2 仓库**没有解决**的（= 本项目的真正卡点）
+### 8.2 仓库**没有解决**的（= 本项目的卡点）
 
 1. **HAL 层零覆盖**。仓库是"编解码器库 + 平台胶水"的集合，**不含任何 Android 音频 HAL / AIDL / HIDL 代码**。设备缺的是厂商 HAL 对 `Lhdcv5Configuration` 的实现（§7 已验证：设备厂商 HAL 只有 `lhdcConfig`）。**这不是一个可以通过换库解决的问题**——除非重写厂商 HAL（无源码）或把链路切到 AIDL 实现（设备无该实现）。
 2. **Rust 版不能直接替换**：符号名不同（`lhdcv5_enc_ffi_*` ≠ `lhdcv5_util_*`）、缺 5 个 BT 侧函数、无 lossless/JAS/META/AR/LARC/VBR/S32、`Cargo.toml` 无法为 Android target 构建（缺 `android_logger`）。要可用必须做 §4.4 列出的 5 项改造。
@@ -736,11 +736,11 @@ vendor.mediatek.hardware.bluetooth.audio @2.2 ::IBluetoothAudioProvidersFactory/
 4. **`LHDC-V5-Encoder`（C 版）与 `LHDC-V5-Decoder` 两个 submodule 未初始化**，本地为空目录。
 5. **`liblhdc-hyperos2_0_211_0` 的 .so 是 5.0.4，比设备旧**，且与 Magisk 模块同源 —— 不能当作"设备固件基线"使用。
 
-### 8.3 对"真·V5 通路"任务的净增量
+### 8.3 对"V5 通路"任务的净增量
 
 | 若目标是… | 本仓库的贡献 |
 |---|---|
-| **A. 让配置真正送到 HAL（不伪装）** | **≈ 0**。需要的是 HAL 层（AIDL 实现或 HIDL 桥接），仓库完全没有。**当前的 P0/P1/P2 伪装方案仍然是唯一可行路线**，除非能在 APEX 内让协议栈走 AIDL 分支。 |
+| **A. 让配置送到 HAL（不伪装）** | **≈ 0**。需要的是 HAL 层（AIDL 实现或 HIDL 桥接），仓库完全没有。**当前的 P0/P1/P2 伪装方案仍然是唯一可行路线**，除非能在 APEX 内让协议栈走 AIDL 分支。 |
 | **B. 换掉编码器为开源实现（去闭源依赖）** | **有实质帮助**，但工程量不小：改 Rust 构建（android_logger / 共享库 / opt-level）+ 补齐 15 个 BT 侧符号（或反向补齐 28 个 `lhdcv5_util_*` wrapper）+ 真机码流验证 + 接受 lossless 等特性缺失。 |
 | **C. 理解 V5 配置面 / 码流格式** | **帮助很大**。`lhdcv5_api.h` + `lhdcv5BT_ext_func.h` + Rust `enc/process.rs` + CIE constants 是四份互补的规格。 |
 

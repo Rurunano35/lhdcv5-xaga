@@ -1,6 +1,6 @@
 # 交付模块：lhdcv5-real
 
-在 xaga 上打通真·LHDC V5 通路（原生 `codec_type=12` + 192 kHz）的单一 KernelSU 模块。
+在 xaga 上打通 LHDC V5 通路（原生 `codec_type=12` + 192 kHz）的单一 KernelSU 模块。
 
 ## 组成
 
@@ -21,7 +21,7 @@
 ## ABR 码率上限（上限 = 耳机宣告的最高档位）
 
 Zygisk 部分除机型白名单外，还把 LHDC V5 自适应档（ABR）的码率上限从 400 kbps 抬到
-**耳机自己宣告的最高档位**。链路与证据见 `docs/LHDC-V5-真通路-实现报告.md` §5.5：
+**耳机自己宣告的最高档位**。链路与证据见 `docs/LHDC-V5-通路-实现报告.md` §5.5：
 
 | # | 位置（`liblhdcv5BT_enc.so`） | 改什么 |
 |---|---|---|
@@ -104,7 +104,7 @@ adb shell su -c "dd if=/proc/\$(pidof com.android.bluetooth)/mem bs=16 count=4 \
 #   期望 0x6724 起：e91b40b9 29050051 2905891a 785b69b8 a13300d1 01faff17 …
 ```
 
-完整清单见 `docs/LHDC-V5-真通路-实现报告.md` §6.2 与 §5.5.6。
+完整清单见 `docs/LHDC-V5-通路-实现报告.md` §6.2 与 §5.5.6。
 
 ## 回退
 
