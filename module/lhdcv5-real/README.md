@@ -125,7 +125,8 @@ adb reboot
   `/data/property/persistent_properties`，**与模块目录无关，删模块不会清掉它**。
   用 `ksud resetprop -p -d`；`setprop … ""` 只是持久化一个空值条目，不算删。
 - 删除本模块的落地产物与中间文件：`/data/vendor/lhdcv5/`、
-  `/data/misc/bluedroid/lhdcv5_sr.conf`、`/data/local/tmp/ld.new`、
+  `/data/misc/bluedroid/lhdcv5_sr.conf`（采样率偏好，回退路径
+  `/data/local/tmp/lhdcv5_sr.conf` 也一并删）、`/data/local/tmp/ld.new`、
   `/data/local/tmp/lhdcv5-aidl.log`。
 
 （本项目历史上手工推入 `/data/local/tmp` 的临时文件不属于模块产物，脚本刻意不碰。）
@@ -145,7 +146,8 @@ adb shell su -c 'touch /data/adb/modules/lhdcv5-real/disable && reboot'
 adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real'
 adb shell su -c 'ksud resetprop -p -d persist.bluetooth.a2dp_offload.disabled'
 adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf \
-                        /data/local/tmp/ld.new /data/adb/lhdcv5.log'
+                        /data/local/tmp/lhdcv5_sr.conf /data/local/tmp/ld.new \
+                        /data/local/tmp/lhdcv5-aidl.log'
 ```
 
 ### 什么会自己消失、什么不会

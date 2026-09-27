@@ -950,7 +950,8 @@ adb reboot
 1. **删除** `persist.bluetooth.a2dp_offload.disabled` —— 用
    `ksud resetprop -p -d`（真删）。**不能用 `setprop … ""`**：那只会持久化一个空值条目。
 2. 删除本模块的落地产物与中间文件：`/data/vendor/lhdcv5/`（2.2 MB）、
-   `/data/misc/bluedroid/lhdcv5_sr.conf`（采样率偏好）、`/data/local/tmp/ld.new`、
+   `/data/misc/bluedroid/lhdcv5_sr.conf`（采样率偏好，回退路径
+   `/data/local/tmp/lhdcv5_sr.conf` 一并删）、`/data/local/tmp/ld.new`、
    `/data/local/tmp/lhdcv5-aidl.log`。
 
 本项目历史上手工推入 `/data/local/tmp` 的临时文件（安装包、调试 dump 等）**不属于模块
@@ -970,7 +971,8 @@ adb shell su -c 'touch /data/adb/modules/lhdcv5-real/disable && reboot'
 adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real'
 adb shell su -c 'ksud resetprop -p -d persist.bluetooth.a2dp_offload.disabled'
 adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf \
-                        /data/local/tmp/ld.new /data/adb/lhdcv5.log'
+                        /data/local/tmp/lhdcv5_sr.conf /data/local/tmp/ld.new \
+                        /data/local/tmp/lhdcv5-aidl.log'
 ```
 
 #### 6.3.4 什么会自己消失、什么不会（实测）
