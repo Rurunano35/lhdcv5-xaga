@@ -4,7 +4,8 @@
 「被固件挡住」变成**开机即用的原生通路**：蓝牙协议栈改走 AIDL 传输层驱动音频 HAL，
 LHDC V5 以 `codec_type = 12` **原生送达**（不再被伪装成 V3），并解锁 **192 kHz**。
 
-全部改动仅存在于内存，`/vendor` 与 APEX 分区**磁盘零写入**，卸载后与出厂一致。
+对 `/vendor` 与 APEX 是磁盘**零写入**（全部靠内存 bind mount）；运行时会在 `/data` 下留少量文件
+与一条持久属性，卸载时由模块自带的 `uninstall.sh` 清掉，所以**卸载后与出厂一致**。
 
 > ⚠️ **本项目只针对 xaga（Redmi Note 11T Pro）+ HyperOS `OS2.0.12.0.ULOCNXM`。**
 > 模块内移植的 HAL 库取自 Redmi Note 14 Pro（malachite）的固件，按 xaga 的接口版本
@@ -61,7 +62,7 @@ G1–G3 可以打补丁，**G4 不行** —— 在 HIDL 链路上，"V5 配置"�
 | 传输码率             | ABR 上限 =**耳机宣告的最高档位**（原厂封顶 400 kbps，本机耳机高音质档实测 **900 kbps**） |
 | 采样率偏好           | 用户改过的采样率**跨断开重连保持**，关闭蓝牙重连也不回落（详见[实现报告 §5.6](docs/LHDC-V5-通路-实现报告.md)） |
 | 稳定性               | PCM 零偏差、无 underflow、无崩溃                                                         |
-| 磁盘改动             | **零** —— 全部内存挂载，`/vendor` 原件 SHA256 不变                                     |
+| `/vendor` 改动       | **零** —— 全部内存挂载，原件 SHA256 不变（`/data` 下的少量产物见「卸载与回退」）        |
 
 ---
 
@@ -198,7 +199,8 @@ adb reboot
 - **删除** `persist.bluetooth.a2dp_offload.disabled`（用 `ksud resetprop -p -d` 真删；
   `setprop … ""` 只是持久化一个空值条目，不算删）
 - 删除本模块的落地产物与中间文件：`/data/vendor/lhdcv5/`（2.2 MB）、
-  `/data/misc/bluedroid/lhdcv5_sr.conf`、`/data/local/tmp/ld.new`、`/data/local/tmp/lhdcv5-aidl.log`
+  `/data/misc/bluedroid/lhdcv5_sr.conf`（采样率偏好；回退路径 `/data/local/tmp/lhdcv5_sr.conf` 也一并删）、
+  `/data/local/tmp/ld.new`、`/data/local/tmp/lhdcv5-aidl.log`
 
 只停用、不清理：
 

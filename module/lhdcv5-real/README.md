@@ -171,7 +171,8 @@ adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf 
 # 不再有 bind 到 /vendor 的条目
 adb shell 'mount | grep vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio | wc -l'   # 期望 0
 # offload 回到 ROM 默认（/vendor/build.prop:435 = false）
-adb shell su -c 'getprop persist.bluetooth.a2dp_offload.disabled'                          # 期望空
+adb shell su -c '/data/adb/ksud resetprop -P persist.bluetooth.a2dp_offload.disabled'  # 期望 "not found"
+#   别用 getprop 判空：属性被真删 与 被设成空值，读回来都是空串，分不出来
 # 落地产物已清
 adb shell su -c 'ls /data/vendor/lhdcv5'                                                   # 期望 No such file
 ```
