@@ -13,6 +13,10 @@
 #   4. /data/local/tmp/lhdcv5-aidl.log           （post-fs-data.sh 每次开机重写）
 #   5. /data/local/tmp/ld.new                    （post-fs-data.sh 写 ld.config 补丁的中间文件）
 #
+# ★ 卸载后**不留任何文件**，包括本脚本自己的日志：日志只写 logcat（缓冲区自清理，
+#   不是磁盘残留）。要看清理过程就在重启后立刻抓：
+#       adb logcat -d -s LHDCV5U
+#
 # 清不了也不需要清的（重启即自愈，无需在这里处理）：
 #   - /linkerconfig/ld.config.txt —— tmpfs，每次开机由系统重建
 #   - /vendor 下被 bind 顶替的 4 个文件 —— bind mount 只存在于内存
@@ -21,9 +25,7 @@
 # 本项目历史上手工推入 /data/local/tmp 的临时文件（安装包、调试 dump 等）
 # 不属于本模块的产物，本脚本刻意不碰，由使用者在模块外自行处置。
 
-LOG=/data/local/tmp/lhdcv5-uninstall.log
-: > "$LOG"
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG"; }
+log() { /system/bin/log -t LHDCV5U "$@" 2>/dev/null; }
 log "=== lhdcv5-real 卸载清理开始 ==="
 
 # resetprop 优先用 KernelSU 自带的；Magisk 的 resetprop 也可
@@ -57,5 +59,4 @@ for f in /data/vendor/lhdcv5 \
 done
 
 log "=== 完成。请重启：bind mount 与 Zygisk 内存补丁都只在重启后才会消失 ==="
-# 本脚本自己的日志 lhdcv5-uninstall.log 刻意保留：它是这次清理的唯一凭据，
-# 且删除正在写入的文件没有意义。它不属于模块产物，看完可随手删掉。
+# 本脚本不写任何文件：以上日志只进 logcat。卸载完成后本模块在磁盘上零残留。

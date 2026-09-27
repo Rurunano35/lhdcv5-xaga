@@ -945,8 +945,7 @@ adb shell su -c 'ksud module uninstall lhdcv5-real'   # 或在 KSU 管理器里�
 adb reboot
 ```
 
-`uninstall.sh` 只清**本模块自己的产物**，共两件事（日志留在
-`/data/local/tmp/lhdcv5-uninstall.log`）：
+`uninstall.sh` 只清**本模块自己的产物**，共两件事（日志只进 logcat，**不落盘**）：
 
 1. **删除** `persist.bluetooth.a2dp_offload.disabled` —— 用
    `ksud resetprop -p -d`（真删）。**不能用 `setprop … ""`**：那只会持久化一个空值条目。
@@ -989,8 +988,10 @@ adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf 
 **必须手动清**：`persist.bluetooth.a2dp_offload.disabled=true`
 （落在 `/data/property/persistent_properties`，与模块目录无关）、上面第 2 条列的那些文件。
 
-**不消失但无害**：`bt_config.conf` 里 `Codecs` 列表中的 `LHDC V5`（下次 BT 启动会重写）、
-`/data/local/tmp/lhdcv5-uninstall.log`。
+**不消失但无害**：`bt_config.conf` 里 `Codecs` 列表中的 `LHDC V5`（下次 BT 启动会重写）。
+
+`uninstall.sh` 刻意不写任何文件 —— 它的日志只进 logcat（`adb logcat -d -s LHDCV5U`），
+所以卸载完成后本模块在磁盘上**零残留**。
 
 #### 6.3.5 判据
 

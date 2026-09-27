@@ -130,16 +130,23 @@ G1–G3 可以打补丁，**G4 不行** —— 在 HIDL 链路上，"V5 配置"�
 
 ## 安装
 
+**方式一：装 Release 里的 zip（推荐）**
+
+在 KernelSU 管理器里「从本地安装」选择 `lhdcv5-real-v1.0.zip`，装完重启。
+zip 的根目录就是模块内容，管理器会自己放到位。
+
+**方式二：手动推目录**
+
 ```bash
-# 1) 把模块目录推到 KernelSU 的模块目录
 adb push module/lhdcv5-real /data/adb/modules/
-
-# 2) 确保启动脚本有执行权限
-adb shell su -c 'chmod 0755 /data/adb/modules/lhdcv5-real/post-fs-data.sh'
-
-# 3) 重启
 adb reboot
 ```
+
+方式二不需要 `chmod`：KernelSU 是用 `sh` 拉起 `post-fs-data.sh` / `uninstall.sh` 的，不依赖执行位。
+
+两种方式装完都**必须重启**才生效 —— Zygisk 组件在开机注入，挂载也在开机早期做。
+卸载见[卸载与回退](#卸载与回退)：在管理器里移除即可，模块自带 `uninstall.sh`，
+下次开机自动清掉 offload 属性与 `/data` 下的产物，**磁盘上零残留**。
 
 
 ## 验证
@@ -177,7 +184,7 @@ adb shell su -c 'ksud module uninstall lhdcv5-real'   # 或在 KSU 管理器里�
 adb reboot
 ```
 
-脚本会（日志留在 `/data/local/tmp/lhdcv5-uninstall.log`）：
+脚本会（日志只进 logcat，不落盘）：
 
 - **删除** `persist.bluetooth.a2dp_offload.disabled`（用 `ksud resetprop -p -d` 真删；
   `setprop … ""` 只是持久化一个空值条目，不算删）
