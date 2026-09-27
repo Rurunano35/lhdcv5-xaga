@@ -42,6 +42,7 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>  // clock_gettime：重放的最小间隔用单调时钟
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -203,118 +204,67 @@ constexpr AbrCodeSite kAbrCodeSites[] = {
 // 48 kHz，而是保持用户选定的值。要求是**持久化用户设置**，不是锁死采样率，也不许写死值。
 //
 // 根因（见 docs 的实现报告 §5.6）：AOSP 靠 A2dpService.updateDeveloperPreferences()
-// 把偏好写进 Settings.Secure 并在重连时重新下发，**本 ROM 没有这个方法** ——
+// 把用户偏好写进 Settings.Secure 并在重连时重新下发，**本 ROM 没有这个方法** ——
 // 用户的选择只活在当前会话的内存里，一断连就归零。
 //
-// 为什么不自己重新下发一次
-// ------------------------
-// 曾经评估的方案是 hook BtaAvCo::SetCodecOtaConfig，在协商完成后调用
-// bta_av_co_set_codec_user_config 把偏好再送一遍。放弃的原因：该函数内部会调
-// BTA_AvReconfig → 触发 AVDTP RECONFIGURE → 对端回 SET_CONFIG → 又走一遍
-// SetCodecOtaConfig，形成「重下发 → 重新协商 → 再重下发」的环，需要额外机制才能收敛。
+// 做法：记住用户那一次调用，重连协商完后原样重放
+// ----------------------------------------------
+// 用户点选走的是这条路：
+//   MIUI 页面 → btif_a2dp_source_encoder_user_config_update_event
+//             → bta_av_co_set_codec_user_config(RawAddress const&,
+//                                               btav_a2dp_codec_config_t const&, bool*)
+// 它是设备上**唯一**被验证过能改到采样率的入口（手动点选确实有效）。所以本模块
+// 只围绕这一次调用做两件事：
+//   1. 捕获：把该符号的 GOT 槽（0xf942d8）重定向到模块，**只在返回 true 时**记下
+//      那次调用用的**完整 56 字节配置**（不是只记采样率 —— 编解码器优先级、
+//      位深、声道模式都在里面，重放时要原样送回）。
+//   2. 重放：重连时 BtaAvCo::SetCodecOtaConfig（GOT 0xf941f0）协商完成后，
+//      用记下的配置再调一次同一个入口 —— 与用户手动点选走的是同一条路。
 //
-// 实际方案：换掉分派依据，其余一律不动
-// ------------------------------------
-// A2dpCodecConfigLhdcV5Base::setCodecConfig 在 0x799668 处取「用户选择」：
+// 为什么不改分派指令（走过的弯路，务必不要再试）
+// --------------------------------------------
+// 一开始的做法是把 A2dpCodecConfigLhdcV5Base::setCodecConfig 里 0x799668 的
+// `ldr w9, [x20, #0x140]`（mCodecUserConfig.sample_rate）换成持久化的值，
+// 让它走 .rodata 0x2c3ee0 那张跳转表。**实测无效**，原因：
+//   那段 switch 的四个分支后面各有一道能力位校验 `tbz/tbnz w24, #N`，而
+//   w24 在这台设备上恒为 0（它来自 `and w24, [sp+0x1c1], [x28+6]`，
+//   而 [sp+0x1c1] 在函数序言里被 `stp xzr,xzr,[sp,#0x1b8]` 清零后全函数再无写入），
+//   于是四个分支永远全部落到 0x799698 的兜底分支，那张跳转表是死代码。
+//   决定采样率的是 0x7996c8 `ldr w8, [x20, #0x178]` 索引的另一张表
+//   （.rodata 0x2c3f21），而 +0x178 是对象 +0x170 那个结构的 sample_rate ——
+//   **正是 A2dpCodecConfig::setCodecUserConfig 写进去的那份数据**，
+//   即「用户手动点选」才会写的东西。
+// 所以：唯一可控的输入就是重放用户那次调用本身；改分派索引是白费力气。
 //
-//   0x799668  ldr  w9, [x20, #0x140]   ; w9 = mCodecUserConfig.sample_rate（用户选择的位图）
-//   0x79966c  mov  w8, #1
-//   0x799670  str  wzr, [x20, #0x60]   ; mCodecConfig.sample_rate = 0
-//   0x799674  cmp  w9, #0x40
-//   0x799678  b.hi <按对端能力选>
-//   0x79967c..0x799690  跳转表分派（.rodata 0x2c3ee0）
+// 重放时机与防环
+// --------------
+// 重放会经 BtaAvCo::SetCodecUserConfig 内部的 BTA_AvReconfig 触发一次
+// AVDTP RECONFIGURE。RECONFIGURE 是对端只回 RECONFIGURE 响应、不会回 SET_CONFIG，
+// 因此不会形成「重放 → 重新协商 → 再重放」的环；即便如此仍加一道最小间隔
+// （kSrReplayMinGapMs）兜底，异常情况下也不会反复触发。
 //
-// 即这段代码**本来就实现了「用户选择 ∩ 对端能力」**，缺的只是「用户选择跨重连存活」。
-// 所以只需要把 0x799668 那一条 4 字节指令改成跳到本模块的跳板，由跳板把 w9 换成
-// 我们持久化的采样率位图；跳转表及其后所有逻辑（含对端能力校验）原封不动。
-//
-// 调用链已逐级验证（全部有二进制证据）：
-//   BtaAvCo::ProcessSetConfig (0x693fb0)
-//     → BtaAvCo::SetCodecOtaConfig (0x694a40)
-//       → A2dpCodecs::setCodecOtaConfig (0x7682a0)
-//         → 虚表 slot 6 = A2dpCodecConfig::setCodecUserConfig (0x764b20)
-//             [0x764c2c ldr x9,[x21] / 0x764c44 ldr x8,[x9,#0x28] / 0x764c50 blr x8]
-//           → 虚表 slot 5 = A2dpCodecConfigLhdcV5Base::setCodecConfig (0x7992e0)
-//             → 站点 0x799668
-// （两个虚表的 slot 5/6 是在**运行中的进程内存**里读出来的：对象虚指针 +0x28 处
-//   是 0x7992e0、+0x30 处是 0x764b20。）
-//
-// 捕获用户选择
-// ------------
-// 用户点选走的是另一条路：MIUI 页面 → btif_a2dp_source_encoder_user_config_update_event
-// → bta_av_co_set_codec_user_config(RawAddress const&, btav_a2dp_codec_config_t const&, bool*)。
-// 这个符号在 .rela.plt 里有 GOT 槽（0xf942d8），全库只有一处调用它，所以直接把 GOT 槽
-// 重定向到本模块即可捕获 —— 与 P0 用的手法相同，不需要改任何代码。
-// 只在**返回值 true**（确实生效）时记录，因此记录下来的就是用户选中的那一项。
-//
-// 跳板宿主
-// --------
-// 该库 .text 没有任何空隙，模块自身又远在 ±128 MB 之外（4 字节 b 够不着）。宿主取
-// **.plt 的 PLT0 槽**（0xf3e060，32 字节，足够装下跳板）：
-//   - 该库是 -z now（.rela.plt 的 9727 项 addend 全为 0），没有惰性绑定，
-//     GOT 槽永远不会指向 PLT0；
-//   - 全库 272 万条指令扫描：没有任何 b / bl / b.cond 跳进 0xf3e060..0xf3e080，
-//     也没有 adrp+add 组合出这个地址（即没有代码把它当函数指针取用）。
-//
-// 跳板（**只读**，3 条指令 + 3 个 nop + 1 个字面量）：
-//   0xf3e060  adr  x16, #0xf3e078      ; 字面量区地址
-//   0xf3e064  ldr  w9,  [x16]          ; w9 = 持久化的采样率位图
-//   0xf3e068  b    0x79966c            ; 回到 mov w8,#1，其后逻辑原样执行
-//   0xf3e06c..0xf3e074  nop
-//   0xf3e078  .word 采样率位图
-//   0xf3e07c  .word 保留
-// ★ 跳板里**绝对不能有 store**：patch_text 写完会把页恢复成 R|X（本进程实测恢复成功），
-//   一写就吃 SEGV_ACCERR。第一版在这里放了一条计数器自增，直接把蓝牙协议栈打进了
-//   崩溃循环（fault addr = 宿主 +0x18，pc = 宿主 +0x0c）。要观测只能在模块侧想办法。
-//
-// 站点与跳板的写入顺序：先写跳板，最后才改站点（反了会出现「站点已跳向尚未写入的
-// 跳板」的窗口）。站点**只在确实存在有效偏好时才改**：没有偏好时保持原样，
-// 跳板不可达，行为与原生完全一致。用户把采样率改成「自动」（位图不是单一位）时，
-// 站点会被还原成原指令。
+// 只对同一副耳机的 MAC 重放；换了对端就什么都不做，避免把 A 的设置塞给 B。
 //
 // 持久化介质：进程内全局（断连重连不重启 bluetooth 进程，已经够用）+ 一个文件
-// （让偏好也能活过重启 / BT 进程重启）。文件写不进去不算失败，只降级成会话内保持。
-// 注意：跳板是「所有对端共用一个值」。存的是用户最后一次选定的采样率，对端不支持时
-// 由跳转表里的能力校验自动回落，不会越权。
+// （让偏好活过重启 / BT 进程重启）。文件写不进去不算失败，只降级成会话内保持。
 // ---------------------------------------------------------------------------
 
-// 这三个函数定义在本节之后
-bool patch_text(uintptr_t addr, const void *src, size_t len, const char *what);
+// 这两个函数定义在本节之后
 bool redirect_got(uintptr_t got_addr, void *replacement, void **out_original, const char *what);
 void sr_save_pref();
 
-// 站点：换掉「读 mCodecUserConfig.sample_rate」这一条
-constexpr uintptr_t kSrSite = 0x799668;
-constexpr uint32_t kSrSiteOrig = 0xb9414289u;  // ldr w9, [x20, #0x140]
-// 跳板宿主 PLT0（32 字节）
-constexpr uintptr_t kSrHost = 0xf3e060;
-constexpr uintptr_t kSrRateOff = 0x18;  // 宿主机内：采样率位图（跳板只读它）
-constexpr uintptr_t kSrResume = 0x79966c;  // 跳板回到这里（mov w8,#1），其后逻辑原样执行
-constexpr uint32_t kNop = 0xd503201fu;
-constexpr uint32_t kSrHostOrig[8] = {
-    0xa9bf7bf0u, 0xd0000290u, 0xf9446211u, 0x91230210u,  // stp/adrp/ldr/add
-    0xd61f0220u,                                          // br x17
-    0xd503201fu, 0xd503201fu, 0xd503201fu,                // 槽内 nop 填充
-};
-// 跳板 8 个字：3 条指令 + 3 个 nop + 采样率 + 保留字。采样率的初值由模块填。
-//
-// ★ 跳板必须**只读**：patch_text 写完会把页恢复成 R|X（实测在本进程里恢复是成功的），
-//   所以跳板里绝不能有 store。第一版在这里放了一条计数器自增（str w10,[x16]），
-//   页一旦恢复成只读，那条 str 就吃 SEGV_ACCERR，把蓝牙协议栈打进崩溃循环
-//   （实测：fault addr = 宿主 +0x18，pc = 宿主 +0x0c）。
-//   要加可观测性只能在模块侧想办法，不能在这里写内存。
-//
-// 借 x16 当临时寄存器是安全的：x16/x17 在 setCodecConfig 整个 8560 字节里一次都没
-// 被用到（全库扫描确认）。w9 本来就是要被这条指令改写的目标。
-constexpr uint32_t kSrHostAdr = 0x100000d0u;  // adr x16, #0xf3e078
-constexpr uint32_t kSrHostLdr = 0xb9400209u;  // ldr w9, [x16]   跳板只读这个字
-
-// 组装跳板 8 个字。第 3 条是 b <回跳地址>，偏移是库内相对量，与 load bias 无关。
-// （定义在下方 g_sr_rate 之后 —— 采样率的初值要从那儿取。）
-void sr_build_host(uint32_t out[8]);
-
-// bta_av_co_set_codec_user_config 的 GOT 槽，以及该函数（28 字节入口改写封装）的指纹
-constexpr uintptr_t kGotUserConfig = 0xf942d8;
+// 捕获入口（用户偏好）与重放触发点（连接建立）
+constexpr uintptr_t kGotUserConfig = 0xf942d8;  // bta_av_co_set_codec_user_config
+// 重放必须等到**对端的 SEP 已注册**之后。试过在 SetCodecOtaConfig 之后重放，
+// 原生直接报 "cannot find peer SEP to configure for codec type 12"
+// （FindPeerSink 里读 peer->num_sinks == 0），因为那时 AVDTP 流还没 OPEN。
+// ProcessOpen 是流打开的时刻，且它的参数里直接带 RawAddress。
+constexpr uintptr_t kGotOpen = 0xf941f8;        // BtaAvCo::ProcessOpen
+// 「当前实际生效的采样率」只能靠读原生自己的状态得到。A2dpCodecs::
+// getCodecConfigAndCapabilities 会把当前配置写出到它的第 1 个参数，
+// 所以包一层它就有了一个可靠的读数（也用来判断重放到底有没有生效）。
+constexpr uintptr_t kGotGetCfg = 0xf95a28;      // A2dpCodecs::getCodecConfigAndCapabilities
+// 捕获入口本体（28 字节的参数改写封装）的指纹：认不出构建就不动手
 constexpr uint32_t kThunkOrig[7] = {
     0xaa0003e8u,  // mov x8, x0
     0xaa0203e3u,  // mov x3, x2
@@ -339,25 +289,19 @@ struct SrCodecConfig {
 };
 static_assert(sizeof(SrCodecConfig) == 56, "btav_a2dp_codec_config_t 必须是 56 字节");
 
-// 采样率位图（btav_a2dp_codec_sample_rate_t）。只有单一位才当作「用户选定某个采样率」，
-// 多位（如「自动」）视为没有具体偏好。
-constexpr uint32_t kSrValidRates[] = {0x1, 0x2, 0x4, 0x8, 0x10, 0x20};
+uintptr_t g_sr_bias = 0;      // libbluetooth_jni.so 的 load bias；0 表示尚未就绪
+SrCodecConfig g_sr_cfg{};     // 用户最后一次选中的完整配置
+uint8_t g_sr_mac[6] = {0};    // 记录时的对端地址
+bool g_sr_have = false;       // g_sr_cfg / g_sr_mac 是否有效
 
-bool sr_is_single_rate(uint32_t mask) {
-    for (uint32_t r : kSrValidRates) {
-        if (mask == r) return true;
-    }
-    return false;
-}
-
-// ---------------------------------------------------------------------------
-// 采样率偏好状态（进程内）
-uintptr_t g_sr_bias = 0;        // libbluetooth_jni.so 的 load bias；0 表示尚未就绪
-uint32_t g_sr_rate = 0;         // 持久化的采样率位图；0 表示「无偏好，走原生」
-uint8_t g_sr_mac[6] = {0};      // 记录时的对端地址，仅用于日志与排查
-bool g_sr_site_patched = false; // 站点当前是否已被改成跳转
-const char *g_sr_pref_path = nullptr;  // 第一个可写的偏好文件路径；nullptr = 只在进程内保持
+const char *g_sr_pref_path = nullptr;
 bool g_sr_pref_probed = false;
+
+int64_t sr_now_ms() {
+    struct timespec ts {};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
 
 // 偏好文件落点。com.android.bluetooth 的域是 u:r:bluetooth:s0，而 /data/misc/bluedroid
 // 的 label 是 bluetooth_data_file、属主 bluetooth（bt_config.conf 就是它自己写的），
@@ -383,136 +327,55 @@ void sr_pick_path() {
     LOGE("没有可写的偏好文件 —— 采样率偏好只在本次 bluetooth 进程内保持");
 }
 
-// 组装跳板 8 个字。第 3 条是 b <回跳地址>，偏移是库内相对量，与 load bias 无关。
-void sr_build_host(uint32_t out[8]) {
-    const intptr_t d = static_cast<intptr_t>(kSrResume) - static_cast<intptr_t>(kSrHost + 8);
-    out[0] = kSrHostAdr;
-    out[1] = kSrHostLdr;
-    out[2] = 0x14000000u | (static_cast<uint32_t>((d >> 2) & 0x3ffffff));
-    out[3] = kNop;
-    out[4] = kNop;
-    out[5] = kNop;
-    out[6] = g_sr_rate;  // 采样率位图（跳板只读）
-    out[7] = 0;
-}
-
-// 改跳板里的采样率字面量。off 是**相对跳板宿主**的偏移（与 kSrRateOff 同一套），
-// 内部补上 kSrHost —— 少加这一项会把值写到库文件偏移 0x18 处（ELF 头的 e_entry），
-// 而跳板读的那一格始终是装跳板时写进去的旧值，表现就是采样率永远改不动。
-// 宿主页平时是只读的（patch_text 会尽力恢复 R|X），所以每次都重新 mprotect(RWX)。
-// 跳板本身不写内存。
-bool sr_write_word(uintptr_t off, uint32_t value) {
-    const uintptr_t addr = g_sr_bias + kSrHost + off;
-    const uint32_t before = *reinterpret_cast<volatile uint32_t *>(addr);
-    if (before == value) return true;
-    if (!patch_text(addr, &value, sizeof(value), "采样率跳板字面量")) return false;
-    const uint32_t after = *reinterpret_cast<volatile uint32_t *>(addr);
-    LOGI("跳板字面量 0x%" PRIxPTR "（宿主 +0x%" PRIxPTR "）：0x%x -> 0x%x（%s）", addr, off,
-         before, after, after == value ? "读回一致" : "读回不一致");
-    return after == value;
-}
-
-// 站点开关：把 0x799668 改成跳向跳板，或还原成原生指令。
-// 只在「有偏好的那一刻」才打开，所以没有偏好时整条链路与本模块不存在时完全一致。
-bool sr_set_site(bool on) {
-    if (g_sr_bias == 0) return false;
-    const uintptr_t site = g_sr_bias + kSrSite;
-
-    uint32_t want = kSrSiteOrig;
-    if (on) {
-        const intptr_t delta = static_cast<intptr_t>(kSrHost) - static_cast<intptr_t>(kSrSite);
-        want = 0x14000000u | (static_cast<uint32_t>((delta >> 2) & 0x3ffffff));
-    }
-
-    const uint32_t cur = *reinterpret_cast<const volatile uint32_t *>(site);
-    if (cur == want) {
-        g_sr_site_patched = on;
-        return true;
-    }
-    if (cur != kSrSiteOrig) {
-        LOGE("采样率站点 0x%" PRIxPTR " 与本补丁的目标构建不一致（期望 0x%08x 实际 0x%08x）"
-             " —— 不切换", kSrSite, kSrSiteOrig, cur);
-        return false;
-    }
-    if (!patch_text(site, &want, sizeof(want), on ? "采样率改道站点" : "采样率站点还原")) return false;
-
-    const uint32_t after = *reinterpret_cast<const volatile uint32_t *>(site);
-    LOGI("采样率站点 0x%08x -> 0x%08x (%s)", cur, after, after == want ? "读回一致" : "读回不一致");
-    if (after != want) {
-        // 读回不一致等于站点处于未知状态：退回原生指令，宁可功能不生效也不要留个半成品
-        patch_text(site, &kSrSiteOrig, sizeof(kSrSiteOrig), "采样率站点兜底还原");
-        g_sr_site_patched = false;
-        return false;
-    }
-    g_sr_site_patched = on;
-    return true;
-}
-
-// 更新「分发给跳板的值」。
-//
-// ★ 调用时机是关键：必须在**原生流程之前**把值换掉，不能在它返回之后。
-//   用户在设置里点一个新采样率时，原生流程内部就会走一次 setCodecConfig，
-//   而那条路径上的站点已经被我们改道 —— 如果这时跳板喂的还是上一次的旧值，
-//   用户刚选的新值会被当场压回去，表现就是「采样率被锁死、改不动」。
-//   （第一版就是栽在这里：更新放在原生调用返回之后。）
-//
-// mask 不是单一位时表示「用户选了自动之类」，退化成不干预：清掉分发值并把站点还原。
-bool sr_push(uint32_t mask) {
-    if (g_sr_bias == 0) return false;
-
-    if (!sr_is_single_rate(mask)) {
-        if (g_sr_rate != 0) {
-            LOGI("采样率偏好不再是单一位（0x%x）—— 撤销改道，交回原生逻辑", mask);
-            g_sr_rate = 0;
-            sr_write_word(kSrRateOff, 0);
-            sr_set_site(false);
-        }
-        return true;
-    }
-
-    if (g_sr_rate == mask && g_sr_site_patched) return true;
-
-    g_sr_rate = mask;
-    if (!sr_write_word(kSrRateOff, mask)) {
-        LOGE("采样率字面量写入失败 —— 不改道，交回原生逻辑");
-        g_sr_rate = 0;
-        sr_set_site(false);
-        return false;
-    }
-    if (!sr_set_site(true)) {
-        LOGE("站点改道失败 —— 采样率不会被保持");
-        g_sr_rate = 0;
-        return false;
-    }
-    LOGI("采样率分发值已更新为 0x%x（对端能力仍会再校验一次）", mask);
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// 偏好文件：一行 "<采样率位图> <对端 MAC>"。读不出来就当没有偏好。
+// 文件格式：一行 "<对端 MAC 12 位十六进制> <56 字节配置的 112 位十六进制>"。
+// 只认 MAC 与长度都对得上的行；老格式（只剩采样率）一律忽略，当作没有偏好。
 void sr_load_pref() {
     if (g_sr_pref_path == nullptr) return;
     FILE *f = fopen(g_sr_pref_path, "re");
     if (f == nullptr) return;
-    unsigned rate = 0;
-    char mac[32] = {0};
-    const int n = fscanf(f, "%x %31s", &rate, mac);
+
+    char mac[16] = {0};
+    char hex[130] = {0};
+    const int n = fscanf(f, "%12s %128s", mac, hex);
     fclose(f);
-    if (n < 1 || !sr_is_single_rate(rate)) return;
-    g_sr_rate = rate;
-    LOGI("从 %s 读到采样率偏好 0x%x (%s)", g_sr_pref_path, rate, n >= 2 ? mac : "-");
+    if (n != 2 || strlen(hex) != sizeof(SrCodecConfig) * 2) {
+        if (n > 0) LOGI("偏好文件格式不认识（按老格式忽略）：%s", hex[0] ? hex : mac);
+        return;
+    }
+
+    uint8_t mac_bytes[6] = {0};
+    for (int i = 0; i < 6; i++) {
+        unsigned v = 0;
+        if (sscanf(mac + i * 2, "%2x", &v) != 1) return;
+        mac_bytes[i] = static_cast<uint8_t>(v);
+    }
+    uint8_t raw[sizeof(SrCodecConfig)] = {0};
+    for (size_t i = 0; i < sizeof(raw); i++) {
+        unsigned v = 0;
+        if (sscanf(hex + i * 2, "%2x", &v) != 1) return;
+        raw[i] = static_cast<uint8_t>(v);
+    }
+    memcpy(&g_sr_cfg, raw, sizeof(g_sr_cfg));
+    memcpy(g_sr_mac, mac_bytes, sizeof(g_sr_mac));
+    g_sr_have = true;
+    LOGI("从 %s 读到用户偏好：codec_type=%d priority=%d sample_rate=0x%x bits=0x%x channel=0x%x",
+         g_sr_pref_path, g_sr_cfg.codec_type, g_sr_cfg.codec_priority, g_sr_cfg.sample_rate,
+         g_sr_cfg.bits_per_sample, g_sr_cfg.channel_mode);
 }
 
 void sr_save_pref() {
-    if (g_sr_pref_path == nullptr) return;
+    if (g_sr_pref_path == nullptr || !g_sr_have) return;
     FILE *f = fopen(g_sr_pref_path, "we");
     if (f == nullptr) {
         LOGE("偏好文件 %s 不可写 errno=%d —— 偏好只在本次 bluetooth 进程内保持",
              g_sr_pref_path, errno);
         return;
     }
-    fprintf(f, "%x %02x%02x%02x%02x%02x%02x\n", g_sr_rate, g_sr_mac[0], g_sr_mac[1],
-            g_sr_mac[2], g_sr_mac[3], g_sr_mac[4], g_sr_mac[5]);
+    for (int i = 0; i < 6; i++) fprintf(f, "%02x", g_sr_mac[i]);
+    fputc(' ', f);
+    const uint8_t *raw = reinterpret_cast<const uint8_t *>(&g_sr_cfg);
+    for (size_t i = 0; i < sizeof(g_sr_cfg); i++) fprintf(f, "%02x", raw[i]);
+    fputc('\n', f);
     fclose(f);
 }
 
@@ -523,71 +386,109 @@ set_user_config_t g_orig_set_user_config = nullptr;
 
 bool hooked_set_user_config(const void *peer_address, const SrCodecConfig *cfg, bool *restart) {
     if (g_orig_set_user_config == nullptr) return false;
-
-    // 先把分发值换成用户刚选的那个，再让原生流程跑：原生流程内部就会走一次
-    // setCodecConfig，而那条路径上的站点已经被我们改道，值必须是新的。
-    const uint32_t prev = g_sr_rate;
-    sr_push(cfg->sample_rate);
-
     const bool ok = g_orig_set_user_config(peer_address, cfg, restart);
-    if (!ok) {
-        // 这一项没生效（例如对端不是当前活跃设备）：把分发值还原成上一次的
-        sr_push(prev);
-        return false;
-    }
+    if (!ok) return false;  // 没生效的那几项不记
 
+    g_sr_cfg = *cfg;
     if (peer_address != nullptr) {
         memcpy(g_sr_mac, peer_address, sizeof(g_sr_mac));
     }
-    LOGI("捕获用户偏好并已生效：codec_type=%d priority=%d sample_rate=0x%x bits=0x%x channel=0x%x",
+    g_sr_have = true;
+    LOGI("捕获用户偏好并已生效：codec_type=%d priority=%d sample_rate=0x%x bits=0x%x "
+         "channel=0x%x specific=%lld/%lld/%lld/%lld",
          cfg->codec_type, cfg->codec_priority, cfg->sample_rate, cfg->bits_per_sample,
-         cfg->channel_mode);
+         cfg->channel_mode, static_cast<long long>(cfg->codec_specific[0]),
+         static_cast<long long>(cfg->codec_specific[1]),
+         static_cast<long long>(cfg->codec_specific[2]),
+         static_cast<long long>(cfg->codec_specific[3]));
     sr_save_pref();
     return true;
 }
 
-// 站点改道的存活检查：只读 4 字节，变了才吭声。
-// 跳板本身不写内存，所以「跳板到底有没有被执行」无法从内存里看出来 ——
-// 那只能靠重连后的实际采样率来验（见实现报告里的验证清单）。
-uint32_t g_sr_site_seen = 0;
-void sr_check_site() {
-    if (g_sr_bias == 0 || !g_sr_site_patched) return;
-    const uint32_t cur = *reinterpret_cast<const volatile uint32_t *>(g_sr_bias + kSrSite);
-    if (cur == g_sr_site_seen) return;
-    if (g_sr_site_seen != 0) {
-        LOGI("采样率站点字节变了：0x%08x -> 0x%08x（分发值 0x%x）", g_sr_site_seen, cur,
-             g_sr_rate);
-    }
-    g_sr_site_seen = cur;
+// ---------------------------------------------------------------------------
+// 连接建立（AVDTP 流已打开）后，把用户那次选择原样重放一遍 —— 重试到生效为止
+//
+// 为什么必须重试：原生在连接刚建立时会给两个「还没准备好」的拒绝，
+// 都已经在设备上实测到：
+//   bta_av_co.cc(2054) E ... cannot find peer SEP to configure for codec type 12
+//   bta_av_co.cc(2039) W ... not all peer's capabilities have been retrieved
+// 用户手动点选之所以有效，是因为那时候对端状态早就齐了。所以这里不做「挑一个
+// 完美时点」的猜测，改成：每次拿到读数就比对，不一致就再试一次，一致就收手。
+// 失败的重放是空操作，成功的那次会触发一次 AVDTP RECONFIGURE，所以「生效即停」
+// 既不会多触发也不会漏。
+
+using process_open_t = void (*)(void *, uintptr_t, const void *, uintptr_t);
+process_open_t g_orig_process_open = nullptr;
+
+// A2dpCodecs::getCodecConfigAndCapabilities(btav_a2dp_codec_config_t* out, vector*, vector*)
+using get_cfg_t = bool (*)(void *, SrCodecConfig *, void *, void *);
+get_cfg_t g_orig_get_cfg = nullptr;
+
+volatile uint32_t g_sr_effective = 0;  // 原生当前实际生效的采样率
+
+uint8_t g_sr_pending_mac[6] = {0};     // 本次连接的对端（准备重放）
+bool g_sr_pending = false;
+int g_sr_tries = 0;
+int64_t g_sr_next_try_ms = 0;
+
+constexpr int kSrMaxTries = 12;        // 最多试 12 次
+constexpr int64_t kSrRetryGapMs = 1000;
+
+bool hooked_get_cfg(void *self, SrCodecConfig *out, void *v1, void *v2) {
+    bool ok = false;
+    if (g_orig_get_cfg != nullptr) ok = g_orig_get_cfg(self, out, v1, v2);
+    if (ok && out != nullptr) g_sr_effective = out->sample_rate;
+    return ok;
 }
 
-// 装/不装改道所需的一切静态检查。认不出构建就整体放弃，绝不在陌生代码上动手。
-bool sr_install() {
-    uint32_t want_host[8];
-    sr_build_host(want_host);
+// 由频繁出现的时点（属性读取）驱动，不必自己造定时器
+void sr_tick() {
+    if (!g_sr_pending || !g_sr_have || g_orig_set_user_config == nullptr) return;
 
-    // 1) 跳板宿主 32 字节必须还是 PLT0 原文（幂等：已经是本模块写过的值也放行）
-    for (int i = 0; i < 8; i++) {
-        const uintptr_t addr = g_sr_bias + kSrHost + i * 4;
-        const uint32_t cur = *reinterpret_cast<const volatile uint32_t *>(addr);
-        if (cur != kSrHostOrig[i] && cur != want_host[i]) {
-            LOGE("跳板宿主 0x%" PRIxPTR " 与本补丁的目标构建不一致（期望 0x%08x 实际 0x%08x）"
-                 " —— 放弃采样率持久化", kSrHost + i * 4, kSrHostOrig[i], cur);
-            return false;
-        }
+    if (g_sr_effective == g_sr_cfg.sample_rate) {
+        LOGI("采样率已生效（实际 = 期望 = 0x%x）—— 重放结束，共试 %d 次", g_sr_effective,
+             g_sr_tries);
+        g_sr_pending = false;
+        return;
     }
-    // 2) 站点必须还是原生指令，或已被本模块改过
-    const uint32_t site = *reinterpret_cast<const volatile uint32_t *>(g_sr_bias + kSrSite);
-    const uint32_t want = 0x14000000u |
-                          (static_cast<uint32_t>(((static_cast<intptr_t>(kSrHost) -
-                                                   static_cast<intptr_t>(kSrSite)) >> 2) &
-                                                 0x3ffffff));
-    if (site != kSrSiteOrig && site != want) {
-        LOGE("采样率站点 0x%" PRIxPTR " 与本补丁的目标构建不一致（期望 0x%08x 实际 0x%08x）"
-             " —— 放弃采样率持久化", kSrSite, kSrSiteOrig, site);
-        return false;
+    if (g_sr_tries >= kSrMaxTries) {
+        LOGI("重放 %d 次仍未生效（实际仍为 0x%x，期望 0x%x）—— 放弃，本次连接不再尝试",
+             g_sr_tries, g_sr_effective, g_sr_cfg.sample_rate);
+        g_sr_pending = false;
+        return;
     }
-    // 3) 捕获入口必须还是那个三参数改写封装
+
+    const int64_t now = sr_now_ms();
+    if (g_sr_next_try_ms != 0 && now < g_sr_next_try_ms) return;
+    g_sr_tries++;
+    g_sr_next_try_ms = now + kSrRetryGapMs;
+
+    bool restart = false;
+    const bool ok = g_orig_set_user_config(g_sr_pending_mac, &g_sr_cfg, &restart);
+    LOGI("第 %d/%d 次重放用户偏好：期望 0x%x，返回 %d（实际仍为 0x%x，restart=%d）", g_sr_tries,
+         kSrMaxTries, g_sr_cfg.sample_rate, ok ? 1 : 0, g_sr_effective, restart ? 1 : 0);
+}
+
+// BtaAvCo::ProcessOpen(unsigned char seid, RawAddress const& peer_address, unsigned short mtu)
+void hooked_process_open(void *self, uintptr_t seid, const void *peer_addr, uintptr_t mtu) {
+    if (g_orig_process_open != nullptr) g_orig_process_open(self, seid, peer_addr, mtu);
+    if (!g_sr_have || peer_addr == nullptr) return;
+    if (memcmp(peer_addr, g_sr_mac, sizeof(g_sr_mac)) != 0) {
+        LOGI("本次对端不是记录那副耳机 —— 不重放");
+        return;
+    }
+    memcpy(g_sr_pending_mac, peer_addr, sizeof(g_sr_pending_mac));
+    g_sr_pending = true;
+    g_sr_tries = 0;
+    g_sr_next_try_ms = 0;  // 立刻试第一次
+    LOGI("连接建立，准备重放用户偏好（期望 0x%x，当前实际 0x%x）", g_sr_cfg.sample_rate,
+         g_sr_effective);
+}
+
+// ---------------------------------------------------------------------------
+// 装钩子。认不出构建就整体放弃，绝不在陌生代码上动手。
+bool sr_install() {
+    // 捕获入口必须还是那个三参数改写封装
     for (int i = 0; i < 7; i++) {
         const uint32_t cur =
             *reinterpret_cast<const volatile uint32_t *>(g_sr_bias + 0x6998e0 + i * 4);
@@ -598,43 +499,34 @@ bool sr_install() {
         }
     }
 
-    // 4) 先把跳板写全，再决定要不要改站点（顺序反了会出现「站点已跳向半成品跳板」的窗口）
-    if (!patch_text(g_sr_bias + kSrHost, want_host, sizeof(want_host), "采样率跳板")) {
-        LOGE("跳板写入失败 —— 放弃采样率持久化");
-        return false;
-    }
-    LOGI("采样率跳板 32 字节写入 0x%" PRIxPTR "..0x%" PRIxPTR "（分发值 0x%x）", kSrHost,
-         kSrHost + 32, g_sr_rate);
-    // 读回分发值那一格。历史上这里出过一次「写对了日志、写错了地址」的 bug
-    // （少加 kSrHost），装的时候看不出问题、一到运行时改值就永远改不动。
-    {
-        const uintptr_t slot = g_sr_bias + kSrHost + kSrRateOff;
-        const uint32_t rb = *reinterpret_cast<const volatile uint32_t *>(slot);
-        LOGI("跳板分发值读回 0x%" PRIxPTR " = 0x%x", slot, rb);
-        if (rb != g_sr_rate) {
-            LOGE("跳板分发值读回不一致（期望 0x%x 实际 0x%x）—— 放弃采样率持久化", g_sr_rate, rb);
-            return false;
-        }
-    }
-
-    // 5) 捕获入口：GOT 重定向（与 P0 同款手法，纯数据页写入）
+    // 捕获入口：GOT 重定向（与 P0 同款手法，纯数据页写入）
     if (!redirect_got(g_sr_bias + kGotUserConfig,
                       reinterpret_cast<void *>(&hooked_set_user_config),
                       reinterpret_cast<void **>(&g_orig_set_user_config),
                       "采样率捕获入口")) {
         LOGE("捕获入口注册失败 —— 无法记录用户选择");
     }
+    // 重放触发点
+    if (!redirect_got(g_sr_bias + kGotOpen,
+                      reinterpret_cast<void *>(&hooked_process_open),
+                      reinterpret_cast<void **>(&g_orig_process_open),
+                      "采样率重放触发点")) {
+        LOGE("重放触发点注册失败 —— 重连时不会重新下发偏好");
+    }
 
-    // 6) 有持久化偏好才打开改道；否则站点保持原生，跳板不可达。
-    if (sr_is_single_rate(g_sr_rate)) {
-        sr_set_site(true);
-        LOGI("已按持久化偏好启用采样率改道：0x%x", g_sr_rate);
+    // 生效读数
+    if (!redirect_got(g_sr_bias + kGotGetCfg, reinterpret_cast<void *>(&hooked_get_cfg),
+                      reinterpret_cast<void **>(&g_orig_get_cfg), "采样率生效读数")) {
+        LOGE("生效读数注册失败 —— 重放将无法判断是否成功");
+    }
+
+    if (g_sr_have) {
+        LOGI("已载入用户偏好（sample_rate=0x%x）—— 连接建立后会原样重放", g_sr_cfg.sample_rate);
     } else {
-        LOGI("无有效持久化偏好 —— 站点保持原生，采样率行为与本模块不存在时一致");
+        LOGI("暂无用户偏好 —— 用户改一次采样率后才会被记录，本模块在此之前完全不介入");
     }
     return true;
 }
-
 // ---------------------------------------------------------------------------
 
 uintptr_t find_load_bias(const char *soname) {
@@ -749,7 +641,7 @@ int hooked_osi_property_get(const char *key, char *value, const char *default_va
     // 协议栈里稳定出现的时点，未映射时代价只是一次 /proc/self/maps 扫描。
     try_abr_patch();
     nudge_abr_index();
-    sr_check_site();
+    sr_tick();
 
     // createCodec 只认 5 个机型代号；这里让它看到白名单内的一个。
     if (key != nullptr && value != nullptr && strcmp(key, "ro.product.name") == 0) {

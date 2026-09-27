@@ -19,6 +19,7 @@ LHDC V5 在 xaga 上**以原生形态端到端跑通**，关键指标全部实�
 | **PCM 实测速率** | **1,152,457 B/s**（理论 1,152,000，误差 **0.04%**） | 设备侧 `/proc/uptime` 计时两个采样点 |
 | 传输层 | **AIDL**（`client_interface_aidl.cc`） | 此前一直是 `client_interface_hidl.cc` |
 | 传输码率 | ABR 档上限 = **耳机宣告的最高档位**（本机 900 kbps，原厂封顶 400），见 §5.5 | 编码器日志 |
+| 采样率偏好 | 用户改过的采样率**跨断开重连保持**（§5.6） | 重连日志 `采样率已生效（实际 = 期望 = 0x20）` |
 | 稳定性 | PCM `expected/actual` 零偏差，无 underflow，无崩溃 | `dumpsys` |
 
 **与"伪装方案"的本质区别**：旧方案在 HIDL 分发层把 `codec_type = 12`（V5）**改写为 10**（V3），
@@ -641,13 +642,13 @@ b    0x4c58
 4. 降档的**触发频率**没变（仍是队列积压 4 个 tick 一次），变的只是**每次的落差**。
    本机链路撑不住 900，所以仍会看到连续两次降档（900→400→320），但不会再一步到底。
 
-### 5.6 采样率保持：先两次失败，最终以「换掉分派依据」实现
+### 5.6 采样率保持：从「换掉分派依据」到「重放用户那次调用」
 
 **需求**：用户在「设置 → 蓝牙 → 耳机 → 采样率」里改到 96 kHz 后，断开重连不会
 被打回 48 kHz，而是保持用户选定的值。要求是**持久化用户设置**，不是锁死采样率。
 
-> 5.6.1–5.6.5 记录两次失败的尝试（保留下来避免重走）；
-> **5.6.7 是最终实现并通过设备验证的方案**。
+> 5.6.1–5.6.6 记录早期几次失败与当时的推断（保留下来避免重走）；
+> **5.6.7 是最终实现并通过设备验证的方案**，5.6.8 / 5.6.9 是弯路与低层坑的清单。
 
 #### 5.6.1 实测证据（2026-09-26，耳机 Redmi Buds 5 Pro）
 
@@ -755,7 +756,7 @@ b    0x799674              ; 继续原 switch
 - `.text` 内**没有 >= 24 字节的填充空洞**；库内 `0xf64070..0xf65000` 有 3984 字节
   **未映射**间隙（可考虑 `mmap` 作扩展代码区，未验证 SELinux 是否放行）。
 
-#### 5.6.6 若要继续，可选路线
+#### 5.6.6 若要继续，可选路线（写于最终实现之前，历史记录）
 
 - **A. Xposed 模块（推荐）**：设备已装 Vector 框架。Hook MIUI 的
   `MiuiHeadsetCodecSampleRateFragment` —— 点选时把值存进 SharedPreferences，
@@ -771,122 +772,116 @@ b    0x799674              ; 继续原 switch
 `.so` 的 md5 恢复为 `4b75699072f39a17b6e7f0d36703d0df`（仅含 ABR 降档补丁）。
 设备已重启，站点 `0x799670` 经内存比对确认恢复为原指令 `b900629f`。
 
-#### 5.6.7 最终实现：换掉分派依据（已实现并通过设备验证）
+#### 5.6.7 最终实现：捕获用户那次调用，连接建立后重放（已实现并通过设备验证）
 
-**关键认识**：5.6.4 已经解出「跳转表本来就实现了『用户选择 ∩ 对端能力』」。
-所以根本不需要自己重新下发一次偏好（那会引入 reconfig 环，见下），
-**只要把 `0x799668` 那一条读指令的来源换掉**即可：其余逻辑一个字节都不动。
+**一句话**：本模块记住用户点选采样率时**原生实际收到的那次调用**，在耳机连接建立后
+把它**原样重放**，并盯着「实际生效值」重试到生效为止。
 
-**调用链（逐级用二进制证据验证）**：
+**为什么是这个形态**：用户手动点选是设备上**唯一**被验证过能改到采样率的入口
+（`bta_av_co_set_codec_user_config` → `BtaAvCo::SetCodecUserConfig`）。
+既然那条路走得通，就不要另造一条 —— 把同一次调用在正确的时机重放一遍即可。
+AOSP 的 `updateDeveloperPreferences()` 做的也是这件事（连接状态变化时重新下发偏好），
+只是它通过 `Settings.Secure` 落盘、由 Java 层驱动。
 
-```
-BtaAvCo::ProcessSetConfig (0x693fb0)
-  → BtaAvCo::SetCodecOtaConfig (0x694a40)
-    → A2dpCodecs::setCodecOtaConfig (0x7682a0)
-      → 虚表 slot 6 = A2dpCodecConfig::setCodecUserConfig (0x764b20)
-          0x764c2c ldr x9,[x21]        ; x9 = 对象虚指针
-          0x764c44 ldr x8,[x9,#0x28]   ; slot 5
-          0x764c50 blr x8
-        → 虚表 slot 5 = A2dpCodecConfigLhdcV5Base::setCodecConfig (0x7992e0)
-          → 站点 0x799668
-```
+**捕获**：`bta_av_co_set_codec_user_config` 的 GOT 槽 `0xf942d8` 重定向到模块。
+该符号全库只有一处调用者 —— `btif_a2dp_source_encoder_user_config_update_event`
+（源文件 `btif_a2dp_source.cc`），其 config 向量来自 Java `BluetoothA2dp.setCodecConfigPreference`，
+确实是用户偏好而非能力表。**只在返回 true 时**记下那次调用用的**完整 56 字节配置**
+（编解码器类型/优先级、采样率、位深、声道模式、四个 codec_specific 都在里面，
+重放时必须原样送回，只记采样率是不够的）。
 
-两个虚表的 slot 5 / slot 6 是在**运行中进程的内存**里读出来的（对象虚指针 `+0x28`
-处是 `0x7992e0`、`+0x30` 处是 `0x764b20`），不是靠推的 —— 文件里读不到，因为
-`.data.rel.ro` 的指针由打包相对重定位（DT_RELR）在加载时填。
+**重放**：`BtaAvCo::ProcessOpen`（GOT `0xf941f8`）是 AVDTP 流打开、对端状态
+已经落地的时刻。该函数第二个参数直接就是 `RawAddress const&`，所以不必去猜
+`BtaAvCoPeer` 的字段偏移。连接建立后用它调一次同一个入口。
 
-**为什么不是「协商完再重下发一次」**：`bta_av_co_set_codec_user_config` 内部会调
-`BTA_AvReconfig`（`0x697038`）并发触发 AVDTP RECONFIGURE，对端回 SET_CONFIG 后
-又会走一遍 `SetCodecOtaConfig`，形成「重下发 → 重新协商 → 再重下发」的环。
-
-**实现**（`module/lhdcv5-real/zygisk-src/module.cpp`）：
-
-| 环节 | 手法 |
-|---|---|
-| 捕获用户选择 | `bta_av_co_set_codec_user_config` 的 GOT 槽 `0xf942d8` 重定向到模块，**只在返回 true（确实生效）时记录**采样率位图。该符号全库只有一处调用者：`btif_a2dp_source_encoder_user_config_update_event`（源文件 `btif_a2dp_source.cc`），其 config 向量来自 Java `BluetoothA2dp.setCodecConfigPreference` —— 确实是用户偏好，不是能力表。 |
-| 分发 | 站点 `0x799668`（`ldr w9,[x20,#0x140]`）改成 `b 0xf3e060`，跳板把 `w9` 换成持久化值 |
-| 跳板宿主 | `.plt` 的 PLT0 槽 `0xf3e060`（32 字节）。该库 `-z now`，GOT 槽永不指向 PLT0；全库 272 万条指令扫描确认没有任何分支跳进 `0xf3e060..0xf3e080`，也没有 `adrp+add` 组合出这个地址 |
-| 持久化 | 进程内全局 + `/data/misc/bluedroid/lhdcv5_sr.conf`（一行 `<采样率位图> <对端 MAC>`）。该目录 label `bluetooth_data_file`、属主 bluetooth、02777，`u:r:bluetooth:s0` 域可写（已在设备上确认） |
-
-**站点只在确实存在有效偏好时才改**：没有偏好时保持原指令，行为与本模块不存在时完全一致；
-用户把采样率改到位图非单一位（自动之类）时站点会被还原成原指令。所以这是**偏好**，不是锁。
-
-**踩到的坑（务必不要再犯）**：第一版在跳板里放了一条计数器自增（`str w10,[x16]`）用于观测。
-`patch_text` 写完会把页恢复成 R|X（本进程实测**恢复是成功的**，与 5.5.3 里编码器库的结论相反），
-于是跳板里的 `str` 吃 `SEGV_ACCERR`，把 `com.android.bluetooth` 打进**崩溃循环**，
-表现是编码器列表**只剩 SBC**。崩溃栈直接指认了现场：
+**为什么要重试 —— 两条实测到的拒绝**：连接刚建立时原生会把重放拒掉，两次拒绝
+都在设备上抓到了原文：
 
 ```
-Fatal signal 11 (SEGV_ACCERR), fault addr 0x…f078     ← 计数器地址（宿主 +0x18）
-pc 0xf3e06c  libbluetooth_jni.so                      ← 跳板的 str
-#01 0x799610 A2dpCodecConfigLhdcV5Base::setCodecConfig ← 站点确实被执行了
+E bta_av_co.cc(2054) SetCodecUserConfig: peer … : cannot find peer SEP to configure for codec type 12
+W bta_av_co.cc(2039) SetCodecUserConfig: peer … : not all peer's capabilities have been retrieved
 ```
 
-**结论：跳板里只能读，不能写任何内存。** 最终版本 `adr x16,<字面量> / ldr w9,[x16] / b 0x79966c`，
-可观测性改到模块侧（只读比对站点 4 字节）。`x16/x17` 在该函数 8560 字节里一次都没被用到。
+第一条对应 `FindPeerSink()` 里读 `peer->num_sinks == 0`（sink 表还没建），
+第二条是「对端能力还没取全」。**用户手动点选之所以有效，只是因为那时候早就齐了。**
+与其继续猜「哪个时点才算够晚」（已经猜错过两次），不如做成闭环。
 
-**第二个坑（锁死）：分发值必须在原生流程「之前」更新。**
-用户点选新采样率时，原生流程内部就会走一次 `setCodecConfig`，而那条路径上的站点
-已经被改道。第一版把分发值的更新放在 `g_orig_set_user_config()` **返回之后**，
-于是原生流程里那次分派读到的是**上一次的旧值** —— 用户刚选的 192 被当场压回 96，
-UI 再读回来就是 96；而且用户越换值越换不动（旧值被反复重放）。
-现场证据：偏好文件里已经是用户选的 `0x2`(48000)，而生效值仍是 `0x8`(96000)。
-
-正确顺序：
+**闭环怎么闭**：新增第三个 GOT 钩子包住
+`A2dpCodecs::getCodecConfigAndCapabilities`（GOT `0xf95a28`）—— 它的第 1 个参数
+就是当前配置的出参（`btav_a2dp_codec_config_t*`，实测调用点 `0x6927cc` 处
+`add x1, sp, #0x68`），于是模块有了一个**可靠的「实际生效采样率」读数**。
+然后由频繁出现的属性读取驱动：
 
 ```
-进 bta_av_co_set_codec_user_config → 先把分发值换成用户刚选的那个 → 再调原生流程
-                                    → 返回 false（这一项没生效）时把分发值还原
+读数 == 期望  → 收手（本次连接不再尝试）
+读数 != 期望  → 重放一次，最多 12 次、每次间隔 1 秒
 ```
 
-这样**用户主动改值时本模块完全透明**（跳板喂的值与原生 `mCodecUserConfig.sample_rate`
-本来就是同一个），只有重连协商时才由持久化值接管。这是「持久化偏好」与「锁死」的分界点。
+失败的重放是空操作，成功的那次会经 `BTA_AvReconfig` 触发一次 AVDTP RECONFIGURE，
+所以「生效即停」既不会多触发也不会漏。三个钩子之外，**本模块不改任何一条指令**。
 
-**第三个坑（锁死的原因）：字面量写错了地址。**
-`sr_write_word(off, …)` 内部算的是 `g_sr_bias + off`，而传进去的 `kSrRateOff = 0x18`
-是**相对跳板宿主**的偏移，应该再补一个 `kSrHost`。于是运行时的分发值更新被写到了
-`bias + 0x18`（ELF 头的 `e_entry` 处），而跳板读的 `0xf3e078` 从来没人动过 ——
-一直是**装跳板时按偏好文件写进去的那个值**。
-
-这个 bug 阴在：回读校验读的就是刚写进去的那 4 字节，所以它**每次都回报成功**，
-日志照打「分发值已更新」、偏好文件也照存新值，唯独跳板那一格纹丝不动。
-表现就是用户改成 192 / 48 / 44.1 全都无效，生效值永远停在装机时的 96。
-
-现场对照（同一次会话）：
-
-| | 偏好文件 | 跳板字面量 | 实际生效 |
-|---|---|---|---|
-| 修复前 | `1` (44100) | `0x8` (96000) | `mSampleRate: 0x8(96000)` |
-| 修复后 | `1` (44100) | `0x1` (44100) | `mSampleRate: 0x1(44100)` |
-
-修好后三者一致，也**第一次直接证实了「跳板分发值 → 最终 mCodecConfig.sample_rate」这条链**。
-另在装跳板后加了一次分发值回读校验，这类「写对了日志、写错了地址」的错以后会在安装阶段就暴露。
-
-**设备验证**：
+**设备验证**（xaga，LHDC V5，Redmi Buds 5 Pro）：
 
 ```
-LHDCV5A : 从 /data/misc/bluedroid/lhdcv5_sr.conf 读到采样率偏好 0x8 (4873cb634b83)
-LHDCV5A : 采样率跳板 32 字节写入 0xf3e060..0xf3e080（分发值 0x8）
-LHDCV5A : 采样率站点 0xb9414289 -> 0x141e927e (读回一致)
-LHDCV5A : 已按持久化偏好启用采样率改道：0x8
+12:44:47  连接建立，准备重放用户偏好（期望 0x8，当前实际 0x2）
+12:44:47  第 1/12 次重放：期望 0x8，返回 1（实际仍为 0x2，restart=0）   ← 能力未就绪，被拒
+12:44:48  第 2/12 次重放：期望 0x8，返回 1（实际仍为 0x2，restart=1）
+12:44:48  采样率已生效（实际 = 期望 = 0x8）—— 重放结束，共试 2 次
+12:45:02  期望 0x20 的两次断开重连同样在 2 次内生效
 ```
 
-重连（蓝牙进程重启后耳机自动回连）拿到：
-
 ```
-mCodecConfig: {codecName:LHDC V5, mCodecType:12, mCodecPriority:8003,
-               mSampleRate:0x8(96000), mBitsPerSample:0x2(24), mChannelMode:0x2(STEREO), ...}
-ReportSourceCodecState: sample_rate: 96000 bits_per_sample: 24
+mCodecConfig: {codecName:LHDC V5, mCodecPriority:1000000, mSampleRate:0x20(192000), …}
+lhdcv5_encoder_init: Init Encoder sampleRate = 192000, bit per sample = 24, Block size=960
 ```
 
-`mCodecPriority` 仍是默认的 `8003` —— 说明原生路径**没有**收到任何用户偏好，
-96 kHz 只能来自跳板，这同时反证了「站点在重连路径上确实被执行」。
-整机重启后同样保持 96 kHz，无崩溃。
+**两个边界**：
 
-**已知边界**：跳板对所有对端共用同一个值。存的是用户最后一次选定的采样率；
-换成别的耳机时由跳转表里的能力校验自动回落，不会越权。
+- 只对**同一副耳机**的 MAC 重放；换了对端什么都不做，避免把 A 的设置塞给 B。
+- 偏好文件格式是 `<MAC> <56 字节 hex>`；**升级自老格式后需要在设置里重新选一次
+  采样率**以记录偏好（老格式一律忽略，当作没有偏好）。
 
----
+#### 5.6.8 走过的两条弯路（务必不要再试）
+
+**弯路一：换掉 `0x799668` 的分派依据（曾以为这是正解，实测无效）**
+
+`A2dpCodecConfigLhdcV5Base::setCodecConfig` 里 0x799668 是
+`ldr w9, [x20, #0x140]`（取 `mCodecUserConfig.sample_rate`），随后按 `w9`
+索引 `.rodata 0x2c3ee0` 的跳转表分派。看起来「只要把来源换成持久化值就行」。
+
+**实测无效，原因是这张表是死代码**：四个分支后面各有一道能力位校验
+`tbz/tbnz w24, #N`，而 `w24` 恒为 0 —— 它来自 `and w24, [sp+0x1c1], [x28+6]`，
+而 `[sp+0x1c1]` 在函数序言里被 `stp xzr,xzr,[sp,#0x1b8]` 清零后，全函数 8560 字节
+再无任何写入。于是四个分支永远全部落到 `0x799698` 的兜底。
+
+决定采样率的是 `0x7996c8 ldr w8, [x20, #0x178]` 索引的另一张表
+（`.rodata 0x2c3f21`，索引 = `sample_rate - 1`），而 `+0x178` 是对象 `+0x170`
+那个结构的 `sample_rate` —— **正是 `A2dpCodecConfig::setCodecUserConfig` 写进去的
+那份数据**，也就是「用户手动点选」才会写的东西。
+
+**结论：唯一可控的输入就是重放用户那次调用本身，改分派索引是白费力气。**
+
+**弯路二：把重放挂在「协商完成」的时点上**
+
+先后试过挂在 `BtaAvCo::SetCodecOtaConfig` 之后、再挂到 `BtaAvCo::ProcessOpen` 之后，
+都不行 —— 就是 5.6.7 里那两条拒绝。教训是：**不要猜时点，做成闭环。**
+
+**弯路三（更早，见 5.6.3/5.6.4）**：读 `mCodecUserConfig` / 沿用旧值。这两次失败
+当时的归因（「字段被 ROM 重置」）其实只是表象；原因是上面那条「那张表是死代码」。
+
+#### 5.6.9 实现过程中踩到的三个低层坑（都已在设备上复现过）
+
+1. **跳板里不能有 store。** 曾用 `.plt` 的 PLT0 死槽做跳板并在里面放计数器自增，
+   `patch_text` 写完会把页恢复成 `R|X`，那条 `str` 立刻吃 `SEGV_ACCERR`
+   （fault addr = 宿主 +0x18，pc = 宿主 +0x0c），把协议栈打进崩溃循环，
+   表现是编码器列表只剩 SBC。**代码页只能读。**
+2. **改跳板里的字面量要补上宿主偏移。** `sr_write_word(off)` 当时算的是
+   `bias + off`，而传进去的 `off` 是相对跳板的，于是写到了 `bias + 0x18`
+   （ELF 头的 `e_entry`）；回读校验读的正是刚写进去的那 4 字节，所以每次都回报成功，
+   唯独跳板那一格纹丝不动 —— 用户改成 192/48/44.1 全无效，又被误判成「锁死」。
+3. **Zygisk 会缓存模块 .so。** 替换 `/data/adb/modules/*/zygisk/*.so` 后只重启
+   `com.android.bluetooth` 不够，跑起来的仍是旧代码（日志里还是旧字符串）；
+   必须**整机重启**让 Zygisk 重新读取。这一点与「加载时机」那节（5.7）是两回事。
 
 ## 6. 复现与验证
 
@@ -921,6 +916,13 @@ adb shell su -c 'dumpsys bluetooth_manager | grep "PCM read bytes" | head -1; cu
 # 6) 磁盘未被修改
 adb shell su -c 'sha256sum /vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio@2.2-impl.so'
 #    期望 8a26665956b391d4e815aae1173cc3388e418e65227e88c112eb310654511fa2
+
+# 7) 采样率偏好跨重连保持（§5.6）
+#    先在设置里选一次采样率（例如 192 kHz）让它被记录，然后断开耳机再重连；日志应出现
+#    「连接建立，准备重放用户偏好」与「采样率已生效（实际 = 期望 = 0x20）」
+adb shell su -c 'logcat -d -b main | grep LHDCV5A | grep -E "重放|已生效" | tail -5'
+#    偏好落在 /data/misc/bluedroid/lhdcv5_sr.conf，一行 "<对端 MAC> <56 字节配置的 hex>"
+#    注意：升级自老格式后需要在设置里重新选一次采样率，老格式一律忽略
 ```
 
 ### 6.3 回退
