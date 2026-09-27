@@ -181,9 +181,8 @@ adb reboot
 
 - **删除** `persist.bluetooth.a2dp_offload.disabled`（用 `ksud resetprop -p -d` 真删；
   `setprop … ""` 只是持久化一个空值条目，不算删）
-- 删除更早实验遗留的 `persist.bluetooth.lhdcv5.sample_rate` / `persist.vendor.bluetooth.lhdcv5.test`
-- 删除 `/data/vendor/lhdcv5/`（2.2 MB 落地产物）、`/data/misc/bluedroid/lhdcv5_sr.conf`、
-  `/data/local/tmp/ld.new`、`/data/adb/lhdcv5.log` 及 `/data/local/tmp` 下本项目的产物
+- 删除本模块的落地产物与中间文件：`/data/vendor/lhdcv5/`（2.2 MB）、
+  `/data/misc/bluedroid/lhdcv5_sr.conf`、`/data/local/tmp/ld.new`、`/data/local/tmp/lhdcv5-aidl.log`
 
 只停用、不清理：
 
