@@ -168,22 +168,34 @@ adb shell su -c 'logcat -d -b all | grep LHDCV5A'
 
 ## 卸载与回退
 
+模块自带 `uninstall.sh`。KernelSU 在「移除模块」后的**下次开机**、post-fs-data 阶段
+以 root 执行它（cwd = 模块目录），随后才删掉模块目录 —— 它会清掉模块写在**模块目录之外**
+的东西，所以这是推荐方式：
+
 ```bash
-# 方式一：禁用（保留文件）
+adb shell su -c 'ksud module uninstall lhdcv5-real'   # 或在 KSU 管理器里点移除
+adb reboot
+```
+
+脚本会（日志留在 `/data/local/tmp/lhdcv5-uninstall.log`）：
+
+- **删除** `persist.bluetooth.a2dp_offload.disabled`（用 `ksud resetprop -p -d` 真删；
+  `setprop … ""` 只是持久化一个空值条目，不算删）
+- 删除更早实验遗留的 `persist.bluetooth.lhdcv5.sample_rate` / `persist.vendor.bluetooth.lhdcv5.test`
+- 删除 `/data/vendor/lhdcv5/`（2.2 MB 落地产物）、`/data/misc/bluedroid/lhdcv5_sr.conf`、
+  `/data/local/tmp/ld.new`、`/data/adb/lhdcv5.log` 及 `/data/local/tmp` 下本项目的产物
+
+只停用、不清理：
+
+```bash
 adb shell su -c 'touch /data/adb/modules/lhdcv5-real/disable && reboot'
-
-# 方式二：彻底删除
-adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real && reboot'
 ```
 
-挂载与 Zygisk 补丁都是内存操作，重启后自动消失。**只有一个例外**：第 4 步关闭
-A2DP 硬件 offload 用的是 `persist` 属性，会落到 `/data/property`，需要单独清掉：
-
-```bash
-adb shell su -c 'setprop persist.bluetooth.a2dp_offload.disabled "" && reboot'
-```
-
----
+**什么会自己消失、什么不会**：`/vendor` 下被 bind 顶替的文件、`/linkerconfig/ld.config.txt`
+的补丁、Zygisk 内存补丁，这三样重启即自愈；而上面那条 `persist` 属性和 `/data` 下的文件
+**不会**自己走，必须清。不重启的话补丁与挂载都还在，模块"看起来还在工作"。
+（顺带一提：「`/vendor` 原件 sha256 不变」恒成立 —— `/vendor` 是只读的 erofs，
+模块从未写过它 —— 所以它不能当作回退成功的证据。）
 
 ## 常见问题
 
@@ -197,7 +209,7 @@ xaga 上可用 —— 硬件 offload 通路（`MtkBTAudioProviderA2dpHW`）的 `
 **模块会不会改坏系统？**
 不会写入 `/vendor` 或 APEX。`payload/` 里的文件被复制到 `/data/vendor/lhdcv5/`，
 再通过 `bind-mount` 顶替 `/vendor` 上的对应路径 —— 这些都是内存挂载，重启即消失。
-唯一落盘的是上面那条 `persist.bluetooth.a2dp_offload.disabled`。
+落盘的有：`persist.bluetooth.a2dp_offload.disabled` 这一条持久属性，以及 `/data/vendor/lhdcv5/`（载荷副本）、`/data/misc/bluedroid/lhdcv5_sr.conf`（采样率偏好）、`/data/local/tmp/` 下的模块日志。**卸载模块不会自动清掉它们**，模块自带的 `uninstall.sh` 会在下次开机清掉（见「卸载与回退」）。
 
 **为什么我的码率只有 400 kbps？**
 说明耳机在配置里只宣告了低音质档（索引 5 = 400 kbps）。码率上限由耳机许可决定，

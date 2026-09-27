@@ -167,7 +167,8 @@ AIDL 打通后能力列表已暴露 `192000`，但实际协商不到 ——
 ```
 module/lhdcv5-real/
 ├── module.prop               模块描述
-├── post-fs-data.sh           开机早期：落地载荷 + 写 ld.config + 4 项挂载
+├── post-fs-data.sh           开机早期：落地载荷 + 写 ld.config + 4 项挂载 + 关 A2DP offload
+├── uninstall.sh              卸载清理：删 offload 持久属性 + 清 /data 下的残留（见 §6.3）
 ├── payload/                  19 个文件
 │   ├── shim.so                       顶替 MTK HIDL 2.2 实现（含 AIDL 点亮）
 │   ├── shimsym.so                    补齐 android::hardware::details::check
@@ -185,7 +186,7 @@ module/lhdcv5-real/
 │   ├── manifest.xml                 含 AIDL 声明的设备 VINTF 清单
 │   └── bt_audio_policy.xml          samplingRates 加入 176400/192000
 └── zygisk/
-    └── arm64-v8a.so          G1 机型白名单绕过（纯内存补丁）
+    └── arm64-v8a.so          纯内存补丁：G1 机型白名单绕过、ABR 码率上限、采样率偏好保持
 ```
 
 ### 4.2 模块做的五件事（post-fs-data）
@@ -890,7 +891,7 @@ lhdcv5_encoder_init: Init Encoder sampleRate = 192000, bit per sample = 24, Bloc
 ```bash
 adb push module/lhdcv5-real.tar.gz /data/local/tmp/   # 或直接推目录
 adb shell su -c 'cp -a /data/local/tmp/lhdcv5-real /data/adb/modules/'
-adb shell su -c 'chmod 0755 /data/adb/modules/lhdcv5-real/post-fs-data.sh'
+adb shell su -c 'chmod 0755 /data/adb/modules/lhdcv5-real/post-fs-data.sh \n                          /data/adb/modules/lhdcv5-real/uninstall.sh'
 adb reboot
 ```
 
@@ -913,9 +914,14 @@ adb shell su -c 'dumpsys bluetooth_manager | grep -oE "mCodecConfig: \{[^}]*\}" 
 adb shell su -c 'dumpsys bluetooth_manager | grep "PCM read bytes" | head -1; cut -d" " -f1 /proc/uptime'
 #    间隔 20-25 秒再采一次；差值 / 时间差 ≈ 1,152,000 B/s 即为 192kHz×24bit×立体声
 
-# 6) 磁盘未被修改
+# 6) /vendor 未被修改
+#    注意：模块生效时这个路径被 bind mount 顶替，读到的是载荷里的 shim，不是出厂原件。
+#    两个值都要认得出来，才不会误判：
 adb shell su -c 'sha256sum /vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio@2.2-impl.so'
-#    期望 8a26665956b391d4e815aae1173cc3388e418e65227e88c112eb310654511fa2
+#    模块生效时：abad71d02d4fcf4271a6f8f5104a403d79c1f8021e6f2414ac6fe31676205890  (= payload/shim.so)
+#    卸载重启后：8a26665956b391d4e815aae1173cc3388e418e65227e88c112eb310654511fa2  (= 出厂原件 hal22.so)
+#    /vendor 是 erofs 只读，磁盘内容不可能被改；所以「卸后 sha256 等于出厂」这条
+#    **恒成立，不能当作回退成功的证据**（见 §6.3）。
 
 # 7) 采样率偏好跨重连保持（§5.6）
 #    先在设置里选一次采样率（例如 192 kHz）让它被记录，然后断开耳机再重连；日志应出现
@@ -927,10 +933,76 @@ adb shell su -c 'logcat -d -b main | grep LHDCV5A | grep -E "重放|已生效" |
 
 ### 6.3 回退
 
+#### 6.3.1 完整卸载
+
+模块自带 `uninstall.sh`。KernelSU 在「移除模块」后的**下次开机**、post-fs-data 阶段
+以 root 执行它（cwd = 模块目录），**随后**才 `remove_dir_all` 删掉模块目录。
+那一次开机模块已不再加载，所以 `post-fs-data.sh` 不会运行 —— 也就是说，
+模块写在**模块目录之外**的一切都由这个脚本负责。
+
+```bash
+adb shell su -c 'ksud module uninstall lhdcv5-real'   # 或在 KSU 管理器里点移除
+adb reboot
+```
+
+`uninstall.sh` 做三件事（日志留在 `/data/local/tmp/lhdcv5-uninstall.log`）：
+
+1. **删除** `persist.bluetooth.a2dp_offload.disabled` —— 用
+   `ksud resetprop -p -d`（真删）。**不能用 `setprop … ""`**：那只会持久化一个空值条目。
+2. 删除更早实验遗留的 `persist.bluetooth.lhdcv5.sample_rate` 与
+   `persist.vendor.bluetooth.lhdcv5.test`（不是本模块写的，但同属本项目）。
+3. 删除 `/data/vendor/lhdcv5/`（2.2 MB 落地产物）、`/data/misc/bluedroid/lhdcv5_sr.conf`
+   （采样率偏好）、`/data/local/tmp/ld.new`、`/data/adb/lhdcv5.log`
+   与 `/data/local/tmp` 下本项目的产物。
+
+#### 6.3.2 只停用（不清理）
+
 ```bash
 adb shell su -c 'touch /data/adb/modules/lhdcv5-real/disable && reboot'
-# 或删除模块目录后重启
 ```
+
+模块不再加载，但**什么都不清**：offload 属性、`/data/vendor/lhdcv5/`、采样率偏好文件都还在。
+
+#### 6.3.3 手工回退
+
+```bash
+adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real'
+adb shell su -c 'ksud resetprop -p -d persist.bluetooth.a2dp_offload.disabled'
+adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf \
+                        /data/local/tmp/ld.new /data/adb/lhdcv5.log'
+```
+
+#### 6.3.4 什么会自己消失、什么不会（实测）
+
+**重启即自愈，无需处理**：
+
+| 东西 | 为什么 |
+|---|---|
+| `/vendor` 下被 bind 顶替的 4 个文件 | bind mount 只在内存里；`/vendor` 是 erofs 只读，模块从未写过它 |
+| `/linkerconfig/ld.config.txt` 的两行补丁 | `/linkerconfig` 是 tmpfs（`mount` 可证），每次开机由系统重建 |
+| Zygisk 的内存补丁 | 随进程消失 |
+
+**不重启就什么都不算**：补丁、bind mount、属性全都还在，模块"看起来还在工作"。
+
+**必须手动清**：`persist.bluetooth.a2dp_offload.disabled=true`
+（落在 `/data/property/persistent_properties`，与模块目录无关）、上面第 3 条列的那些文件。
+
+**不消失但无害**：`bt_config.conf` 里 `Codecs` 列表中的 `LHDC V5`（下次 BT 启动会重写）、
+`/data/local/tmp/lhdcv5-uninstall.log`。
+
+#### 6.3.5 判据
+
+```bash
+adb shell 'mount | grep -c vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio'  # 期望 0
+adb shell su -c 'getprop persist.bluetooth.a2dp_offload.disabled'                    # 期望空
+adb shell su -c 'ls /data/vendor/lhdcv5'                                             # 期望 No such file
+```
+
+**唯一说明"准入补丁已失效"的判据需要耳机连着**：重启后
+`dumpsys bluetooth_manager` 的 `mCodecsLocalCapabilities` 里不应再出现 LHDC V5。
+（`codecConfigPriorities` 里的 `LHDC V5: 8003` 是 ROM 自带的静态表，一直在，不能当判据。）
+
+**「`/vendor` 原件 sha256 不变」不是有效验证**：`/vendor` 只读，该值恒等于出厂值。
 
 ---
 

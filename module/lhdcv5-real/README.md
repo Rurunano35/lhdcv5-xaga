@@ -108,16 +108,74 @@ adb shell su -c "dd if=/proc/\$(pidof com.android.bluetooth)/mem bs=16 count=4 \
 
 ## 回退
 
+### 完整卸载（推荐）
+
+模块带 `uninstall.sh`：KernelSU 在「移除模块」后的**下次开机**、post-fs-data 阶段以 root
+执行它（cwd = 模块目录），随后才删掉模块目录。它会清掉模块写在**模块目录之外**的东西。
+
+```bash
+# 在 KSU 管理器里移除 lhdcv5-real；等价命令行：
+adb shell su -c 'ksud module uninstall lhdcv5-real'
+adb reboot
+```
+
+卸载脚本做的事（日志留在 `/data/local/tmp/lhdcv5-uninstall.log`）：
+
+- **删除** `persist.bluetooth.a2dp_offload.disabled` —— 它落在
+  `/data/property/persistent_properties`，**与模块目录无关，删模块不会清掉它**。
+  用 `ksud resetprop -p -d`；`setprop … ""` 只是持久化一个空值条目，不算删。
+- 删除 `persist.bluetooth.lhdcv5.sample_rate` / `persist.vendor.bluetooth.lhdcv5.test`
+  （更早实验的遗留，不是本模块写的）。
+- 删除 `/data/vendor/lhdcv5/`、`/data/misc/bluedroid/lhdcv5_sr.conf`、
+  `/data/local/tmp/ld.new`、`/data/adb/lhdcv5.log` 以及 `/data/local/tmp` 下本项目的产物。
+
+### 只停用、不清理
+
 ```bash
 adb shell su -c 'touch /data/adb/modules/lhdcv5-real/disable && reboot'
 ```
 
-挂载与 Zygisk 补丁均为内存操作，磁盘零写入 —— 回退后 `/vendor` 与 APEX 与出厂一致。
-只有第 4 步的 `persist.bluetooth.a2dp_offload.disabled` 会落到 `/data/property`，需要单独清掉：
+模块不再加载，但**什么都不清理**：`/data/vendor/lhdcv5/`、offload 属性、采样率偏好文件都还在。
+想彻底回退请用上面那条。
+
+### 不用脚本时的手工回退
 
 ```bash
-adb shell su -c 'setprop persist.bluetooth.a2dp_offload.disabled "" && reboot'
+adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real'
+adb shell su -c 'ksud resetprop -p -d persist.bluetooth.a2dp_offload.disabled'
+adb shell su -c 'rm -rf /data/vendor/lhdcv5 /data/misc/bluedroid/lhdcv5_sr.conf \
+                        /data/local/tmp/ld.new /data/adb/lhdcv5.log'
 ```
+
+### 什么会自己消失、什么不会
+
+**重启即自愈，无需处理**：
+
+- `/vendor` 下被 bind 顶替的 4 个文件 —— bind mount 只存在于内存；`/vendor` 本身是
+  erofs 只读，模块从来没能写它。**因此「`/vendor` 原件 sha256 不变」这条恒成立，
+  不能当作回退成功的证据。**
+- `/linkerconfig/ld.config.txt` —— tmpfs，每次开机由系统重建。
+- Zygisk 的内存补丁 —— 随进程消失。
+
+**必须清（脚本已处理）**：`persist.bluetooth.a2dp_offload.disabled=true`，以及上面那些文件。
+
+**不会自己消失但无害**：`bt_config.conf` 里 `Codecs` 列表中的 `LHDC V5`（下次 BT 启动会重写）、
+`bt_config.conf` 之外的 `/data/local/tmp/lhdcv5-uninstall.log`。
+
+### 怎么确认回退成功
+
+```bash
+# 不再有 bind 到 /vendor 的条目
+adb shell 'mount | grep vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.audio | wc -l'   # 期望 0
+# offload 回到 ROM 默认（/vendor/build.prop:435 = false）
+adb shell su -c 'getprop persist.bluetooth.a2dp_offload.disabled'                          # 期望空
+# 落地产物已清
+adb shell su -c 'ls /data/vendor/lhdcv5'                                                   # 期望 No such file
+```
+
+**最关键的判据需要耳机连着**：准入补丁只在内存里，回退重启后
+`dumpsys bluetooth_manager` 的 `mCodecsLocalCapabilities` 里应当**不再出现 LHDC V5**
+（注意 `codecConfigPriorities` 里那条 `LHDC V5: 8003` 是 ROM 自带的静态表，一直在，不算）。
 
 ## 构建（可选）
 
