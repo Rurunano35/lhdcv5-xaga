@@ -136,7 +136,7 @@ G1–G3 可以打补丁，**G4 不行** —— 在 HIDL 链路上，"V5 配置"�
 
 **方式一：装 Release 里的 zip（推荐）**
 
-在 KernelSU 管理器里「从本地安装」`lhdcv5-real-v1.0.zip`，然后**重启**。
+在 KernelSU 管理器里「从本地安装」`lhdcv5-real-v1.1.zip`，然后**重启**。
 zip 的根目录就是模块内容，管理器会自己放到位，并把文件打成 `system_file` 标签。
 
 **方式二：手动拷目录（需要 root，且要自己修 SELinux 标签）**
