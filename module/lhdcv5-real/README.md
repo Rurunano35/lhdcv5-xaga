@@ -62,13 +62,13 @@ Zygisk 部分除机型白名单外，还把 LHDC V5 自适应档（ABR）的码�
 
 ## 安装
 
-```bash
-adb push lhdcv5-real /data/adb/modules/
-adb shell su -c 'chmod 0755 /data/adb/modules/lhdcv5-real/post-fs-data.sh'
-adb reboot
-```
+推荐直接装 Release 里的 zip：在 KernelSU 管理器里「从本地安装」，它会自己放好位置、
+并把文件打成 `system_file` 标签，装完重启即可。
 
-整个目录即模块内容，无需打包成 zip。
+手动装见仓库顶层 README 的「安装」一节，注意两点：`/data/adb` 是 `0700 root:root`，
+**`adb push` 直接推不进去**；手工拷入的文件还要 `chcon -R u:object_r:system_file:s0` 修正标签。
+
+不需要 `chmod`：KernelSU 是用 `sh` 拉起 `post-fs-data.sh` / `uninstall.sh` 的，不依赖执行位。
 
 ## 验证
 

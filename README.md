@@ -130,21 +130,30 @@ G1–G3 可以打补丁，**G4 不行** —— 在 HIDL 链路上，"V5 配置"�
 
 ## 安装
 
+**前置**：设备上要已经有 Zygisk 提供方（xaga 上装的是 `zygisksu`，确认 `/data/adb/modules/` 下有它）。
+没有 Zygisk，`zygisk/arm64-v8a.so` 不会被注入 → V5 在编解码器创建阶段就被丢弃，模块看起来"没生效"。
+
 **方式一：装 Release 里的 zip（推荐）**
 
-在 KernelSU 管理器里「从本地安装」选择 `lhdcv5-real-v1.0.zip`，装完重启。
-zip 的根目录就是模块内容，管理器会自己放到位。
+在 KernelSU 管理器里「从本地安装」`lhdcv5-real-v1.0.zip`，然后**重启**。
+zip 的根目录就是模块内容，管理器会自己放到位，并把文件打成 `system_file` 标签。
 
-**方式二：手动推目录**
+**方式二：手动拷目录（需要 root，且要自己修 SELinux 标签）**
+
+`/data/adb` 是 `0700 root:root`，**`adb push` 直接推到那里会被拒**（adb 以 shell 用户运行）；
+而且手工拷进去的文件会继承父目录的 `adb_data_file` 标签，与模块需要的 `system_file` 不一致。所以要这样：
 
 ```bash
-adb push module/lhdcv5-real /data/adb/modules/
+adb push module/lhdcv5-real /data/local/tmp/
+adb shell su -c 'rm -rf /data/adb/modules/lhdcv5-real'
+adb shell su -c 'cp -a /data/local/tmp/lhdcv5-real /data/adb/modules/'
+adb shell su -c 'chcon -R u:object_r:system_file:s0 /data/adb/modules/lhdcv5-real'
 adb reboot
 ```
 
-方式二不需要 `chmod`：KernelSU 是用 `sh` 拉起 `post-fs-data.sh` / `uninstall.sh` 的，不依赖执行位。
+两种方式都**不需要 `chmod`**：KernelSU 是用 `sh` 拉起 `post-fs-data.sh` / `uninstall.sh` 的，
+不依赖执行位。也都**必须重启**才生效 —— Zygisk 组件在开机注入，挂载也在开机早期做。
 
-两种方式装完都**必须重启**才生效 —— Zygisk 组件在开机注入，挂载也在开机早期做。
 卸载见[卸载与回退](#卸载与回退)：在管理器里移除即可，模块自带 `uninstall.sh`，
 下次开机自动清掉 offload 属性与 `/data` 下的产物，**磁盘上零残留**。
 

@@ -9,7 +9,9 @@
 # 本脚本**只清理本模块自己的产物**，共五处：
 #   1. persist.bluetooth.a2dp_offload.disabled   （post-fs-data.sh 每次开机设）
 #   2. /data/vendor/lhdcv5/                      （post-fs-data.sh 落地载荷）
-#   3. /data/misc/bluedroid/lhdcv5_sr.conf       （zygisk 模块写的采样率偏好）
+#   3. 采样率偏好文件（zygisk 模块写的）。module.cpp 的 sr_pick_path() 有两个候选路径：
+#      首选 /data/misc/bluedroid/lhdcv5_sr.conf，回退 /data/local/tmp/lhdcv5_sr.conf ——
+#      **两个都要删**，只删首选的话回退路径生效时会漏。
 #   4. /data/local/tmp/lhdcv5-aidl.log           （post-fs-data.sh 每次开机重写）
 #   5. /data/local/tmp/ld.new                    （post-fs-data.sh 写 ld.config 补丁的中间文件）
 #
@@ -53,6 +55,7 @@ fi
 # ---------- 2) 落地产物与中间文件 ----------
 for f in /data/vendor/lhdcv5 \
          /data/misc/bluedroid/lhdcv5_sr.conf \
+         /data/local/tmp/lhdcv5_sr.conf \
          /data/local/tmp/ld.new \
          /data/local/tmp/lhdcv5-aidl.log; do
   [ -e "$f" ] && { rm -rf "$f" 2>/dev/null && log "已删除 $f"; }
