@@ -15,7 +15,11 @@
 //      以及让顶格生效的全局索引退格。不覆盖耳机的宣告，不做越权。
 //      详细链路与证据见下方「LHDC V5 自适应（ABR）码率上限」一节。
 //   3. 采样率偏好持久化：用户改过的采样率跨重连保持。详见下方
-//      「采样率偏好持久化」一节。
+//      「采样率偏好持久化」一节。重放触发的 RECONFIGURE 之后协议栈会用新配置
+//      重启 AIDL 会话，但旧会话（按默认采样率建的）没被结束会被原生拒绝，
+//      音频通路就此留在旧采样率——编码器/耳机 96k 对混音器 48k，听感约 2 倍速
+//      （即「选过质量后第二次连接音频加速」）。配套的「会话自愈」在
+//      StartSession 入口补上缺失的 EndSession，详见对应小节。
 //
 // 为什么只做这些
 // --------------
@@ -275,6 +279,27 @@ constexpr uint32_t kThunkOrig[7] = {
     0x1422aeb2u,  // b    0xf453c0
 };
 
+// 会话自愈入口：A2DP 软件通路的 AIDL 会话客户端（bluetooth::audio::aidl::
+// BluetoothAudioClientInterface，a2dp_encoding_aidl.cc 经 PLT 调它们）。
+// MTK / HIDL / LE Audio 各有自己的同名函数，用的是别的槽位，不在本补丁范围内。
+constexpr uintptr_t kGotStartSession = 0xf99508;   // ...::StartSession() 的 GOT 槽
+constexpr uintptr_t kGotEndSession = 0xf99490;    // ...::EndSession() 的 GOT 槽
+constexpr uintptr_t kVaddrStartSession = 0x86a990;  // StartSession() 本体（指纹校验用）
+constexpr uintptr_t kVaddrEndSession = 0x86b870;    // EndSession() 本体（指纹校验用）
+// 两个函数的入口字（构建指纹）：认不出就只装捕获/重放，不自愈
+constexpr uint32_t kStartSessionOrig[4] = {
+    0xf800865eu,  // str  x30, [x18], #0x8
+    0xa9ba7bfdu,  // stp  x29, x30, [sp, #-0x60]!
+    0xa9016ffcu,  // stp  x28, x27, [sp, #0x10]
+    0xa90267fau,  // stp  x26, x25, [sp, #0x20]
+};
+constexpr uint32_t kEndSessionOrig[4] = {
+    0xf800865eu,  // str  x30, [x18], #0x8
+    0xd10643ffu,  // sub  sp, sp, #0x190
+    0xa9157bfdu,  // stp  x29, x30, [sp, #0x150]
+    0xf900b3fcu,  // str  x28, [sp, #0x160]
+};
+
 // btav_a2dp_codec_config_t 是 56 字节，字段顺序来自 AOSP，偏移已在设备上核对：
 // codec_type(+0x00) codec_priority(+0x04) sample_rate(+0x08) bits_per_sample(+0x0C)
 // channel_mode(+0x10) [pad +0x14] codec_specific_1..4(+0x18/+0x20/+0x28/+0x30)
@@ -434,6 +459,12 @@ int64_t g_sr_next_try_ms = 0;
 constexpr int kSrMaxTries = 12;        // 最多试 12 次
 constexpr int64_t kSrRetryGapMs = 1000;
 
+// 会话自愈的状态（实现在下方「会话自愈」一节；sr_tick 在重放被接受时开窗）
+bool g_ss_active = false;          // 该实例的 AIDL 会话当前存活
+void *g_ss_self = nullptr;         // 存活会话所属的 client 实例
+int64_t g_ss_heal_until_ms = 0;    // 重放窗口：此期间内允许自愈
+constexpr int64_t kSsHealWindowMs = 60000;
+
 bool hooked_get_cfg(void *self, SrCodecConfig *out, void *v1, void *v2) {
     bool ok = false;
     if (g_orig_get_cfg != nullptr) ok = g_orig_get_cfg(self, out, v1, v2);
@@ -464,6 +495,11 @@ void sr_tick() {
     g_sr_next_try_ms = now + kSrRetryGapMs;
 
     bool restart = false;
+    // 开自愈窗口必须在重放调用【之前】：原生在 set_user_config 内部同步走
+    // AVDTP RECONFIGURE → StartSession 整条链（实测 22:32:16.411 重放调用与
+    // StartSession 被拒在同一个毫秒内），返回后再开窗就晚了 —— 这正是 v1.2
+    // 自愈从未触发的根因（见实现报告 §5.7.4）。
+    g_ss_heal_until_ms = sr_now_ms() + kSsHealWindowMs;
     const bool ok = g_orig_set_user_config(g_sr_pending_mac, &g_sr_cfg, &restart);
     LOGI("第 %d/%d 次重放用户偏好：期望 0x%x，返回 %d（实际仍为 0x%x，restart=%d）", g_sr_tries,
          kSrMaxTries, g_sr_cfg.sample_rate, ok ? 1 : 0, g_sr_effective, restart ? 1 : 0);
@@ -483,6 +519,65 @@ void hooked_process_open(void *self, uintptr_t seid, const void *peer_addr, uint
     g_sr_next_try_ms = 0;  // 立刻试第一次
     LOGI("连接建立，准备重放用户偏好（期望 0x%x，当前实际 0x%x）", g_sr_cfg.sample_rate,
          g_sr_effective);
+}
+
+// ---------------------------------------------------------------------------
+// 会话自愈 —— 修「重放生效后第二次连接音频加速」
+//
+// 现象与链路（2026-11 在设备上实测取证，见实现报告 §「会话自愈」）：
+//   1. 连接刚建立时协议栈先按默认 48k 完成整套启动：编码器 init 48000 →
+//      AIDL OnSessionStarted(48000) → AudioFlinger 的 HAL 输出流按 48000 打开；
+//   2. 偏好重放生效（期望的 96k）→ AVDTP RECONFIGURE → 编码器与耳机端切到 96k；
+//   3. 协议栈紧接着用新 96k PCM 配置调 BluetoothAudioClientInterface::StartSession，
+//      但**旧会话还活着**，原生直接拒绝：client_interface_aidl.cc(333)
+//      "StartSession: session started already" —— 没有 EndSession，audioserver 的
+//      会话、FMQ、HAL 输出流全停留在 48k；
+//   4. 于是：AudioFlinger 按 48k 节奏供 PCM（每秒 48000 个采样），而编码器与耳机
+//      DAC 已按 96k 消费 —— 每秒 48000 个采样喂进 96000 Hz 的链路 ≈ 2 倍速、音调
+//      升高、伴随欠载断续（ReadAudioData 2880/2880 no data 洪泛）。
+//   用户手动切换播放质量之所以能恢复：那条路径会先 stop → EndSession → 再
+//   StartSession，audioserver 收到 OnSessionEnded 作废旧流（session_changed_cb），
+//   AudioFlinger 重新按新会话的 96k 打开输出流（adev_open_output_stream 96000）。
+//
+// 修法：把「先结束旧会话」补进 StartSession 入口。仅当【旧会话仍存活、属于同一
+// 个 client 实例、且处于重放窗口内】时，先调原 EndSession 再放行原 StartSession ——
+// 与手动切换的工作时序逐字相同，audioserver 侧不作任何改动。窗口外、其他实例、
+// 其他配置文件的 StartSession 一律原样透传，上游语义不变。
+// ---------------------------------------------------------------------------
+using start_session_t = int (*)(void *);   // int ...::StartSession()：0 = 成功，-errno = 失败
+using end_session_t = int (*)(void *);     // 同上（返回值仅透传）
+start_session_t g_orig_start_session = nullptr;
+end_session_t g_orig_end_session = nullptr;
+
+int hooked_end_session(void *self) {
+    if (g_orig_end_session == nullptr) return -1;
+    const int ret = g_orig_end_session(self);
+    if (self == g_ss_self) {
+        g_ss_active = false;
+        g_ss_self = nullptr;
+    }
+    return ret;
+}
+
+int hooked_start_session(void *self) {
+    if (g_orig_start_session == nullptr) return -1;
+    if (g_ss_active && self == g_ss_self && g_orig_end_session != nullptr &&
+        g_ss_heal_until_ms != 0 && sr_now_ms() < g_ss_heal_until_ms) {
+        LOGI("会话自愈：旧会话仍存活（重放已把采样率改为 0x%x）——先结束旧会话再按新配置启动",
+             g_sr_cfg.sample_rate);
+        g_orig_end_session(self);
+        g_ss_active = false;
+        g_ss_self = nullptr;
+    }
+    const int ret = g_orig_start_session(self);
+    // 注意返回值语义：这是 errno 风格的 int（0 = 成功），不是 bool。
+    // 成功（0）或「会话仍在」的 EBUSY（-16）都表示 native 侧有存活会话，须如实记账，
+    // 否则下一次 StartSession 会因记账为空而不触发自愈（v1.2 实测踩过的坑）。
+    if (ret == 0 || ret == -16) {
+        g_ss_active = true;
+        g_ss_self = self;
+    }
+    return ret;
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +613,44 @@ bool sr_install() {
     if (!redirect_got(g_sr_bias + kGotGetCfg, reinterpret_cast<void *>(&hooked_get_cfg),
                       reinterpret_cast<void **>(&g_orig_get_cfg), "采样率生效读数")) {
         LOGE("生效读数注册失败 —— 重放将无法判断是否成功");
+    }
+
+    // 会话自愈入口：先核对两个函数的入口指纹，认不出就整组跳过
+    // （只影响自愈，上面已装好的捕获/重放不受牵连）
+    bool ss_ok = true;
+    for (int i = 0; i < 4; i++) {
+        const uint32_t cur = *reinterpret_cast<const volatile uint32_t *>(
+                g_sr_bias + kVaddrStartSession + i * 4);
+        if (cur != kStartSessionOrig[i]) {
+            LOGE("StartSession 入口 0x%" PRIxPTR " 与本补丁的目标构建不一致（期望 0x%08x 实际"
+                 " 0x%08x）—— 放弃会话自愈", kVaddrStartSession + i * 4, kStartSessionOrig[i], cur);
+            ss_ok = false;
+            break;
+        }
+    }
+    if (ss_ok) {
+        for (int i = 0; i < 4; i++) {
+            const uint32_t cur = *reinterpret_cast<const volatile uint32_t *>(
+                    g_sr_bias + kVaddrEndSession + i * 4);
+            if (cur != kEndSessionOrig[i]) {
+                LOGE("EndSession 入口 0x%" PRIxPTR " 与本补丁的目标构建不一致（期望 0x%08x 实际"
+                     " 0x%08x）—— 放弃会话自愈", kVaddrEndSession + i * 4, kEndSessionOrig[i], cur);
+                ss_ok = false;
+                break;
+            }
+        }
+    }
+    if (ss_ok) {
+        if (!redirect_got(g_sr_bias + kGotStartSession,
+                          reinterpret_cast<void *>(&hooked_start_session),
+                          reinterpret_cast<void **>(&g_orig_start_session), "会话自愈启动入口")) {
+            LOGE("会话自愈启动入口注册失败 —— 重放后若旧会话仍在，音频通路可能留在旧采样率");
+        }
+        if (!redirect_got(g_sr_bias + kGotEndSession,
+                          reinterpret_cast<void *>(&hooked_end_session),
+                          reinterpret_cast<void **>(&g_orig_end_session), "会话自愈结束入口")) {
+            LOGE("会话自愈结束入口注册失败 —— 自愈与存活跟踪不可用");
+        }
     }
 
     if (g_sr_have) {

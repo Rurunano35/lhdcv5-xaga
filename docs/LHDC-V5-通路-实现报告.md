@@ -899,7 +899,130 @@ lhdcv5_encoder_init: Init Encoder sampleRate = 192000, bit per sample = 24, Bloc
    唯独跳板那一格纹丝不动 —— 用户改成 192/48/44.1 全无效，又被误判成「锁死」。
 3. **Zygisk 会缓存模块 .so。** 替换 `/data/adb/modules/*/zygisk/*.so` 后只重启
    `com.android.bluetooth` 不够，跑起来的仍是旧代码（日志里还是旧字符串）；
-   必须**整机重启**让 Zygisk 重新读取。这一点与「加载时机」那节（5.7）是两回事。
+   必须**整机重启**让 Zygisk 重新读取。这一点与「Zygisk 部分」（4.3）里
+   讨论的加载时机是两回事。
+
+### 5.7 会话自愈 —— 修复「选过质量后第二次连接音频约 2 倍速加速」（v1.2）
+
+#### 5.7.1 现象
+
+用户选过一次编解码器质量（偏好被记录）之后，**第二次连接**耳机时播放的音频
+明显加速（约 2 倍速、音调升高、伴随断续）；手动切换一次播放质量、或再断开重连
+一次，恢复正常。
+
+#### 5.7.2 取证（2026-11-19/20 设备实测，logcat 全程留档）
+
+复现一次完整连接（偏好 96 kHz，默认协商 48 kHz）：
+
+```
+23:51:55.556  编码器 init：sampleRate=48000, Block size=240
+23:51:55.612  OnSessionStarted - sampleRateHz: 48000          ← AIDL 会话按 48k 建立
+23:51:55.716  adev_open_output_stream: sample_rate=48000       ← HAL 输出流按 48k 打开（AudioFlinger 定格 48k）
+23:51:56.453  重放第 2 次生效：restart=1 → AVDTP RECONFIGURE
+23:51:56.470  编码器销毁重建：sampleRate=96000, Block size=480
+23:51:56.471  协议栈侧 PCM 配置变为 96000；耳机端被重配为 96k
+23:51:56.472  E/client_interface_aidl.cc(333): StartSession: session started already   ← 断链
+23:51:56.888  adev_open_output_stream: sample_rate=48000       ← 输出流仍按 48k 重开
+23:51:56.63+  ReadAudioData: 2880/2880 no data 洪泛（BT 侧按 96k 粒度拉数，供给按 48k 节奏）
+```
+
+听感判定与链路判定一致：混音器按 48 kHz 节奏供 PCM（每秒 48000 个采样），
+而编码器与耳机 DAC 已按 96 kHz 消费 —— 每秒 48000 个采样灌进 96000 Hz 的链路
+≈ 2 倍速、音调升高。欠载（`ONLY READ 0 BYTES OUT OF 2880`）与断续同源于此。
+
+对照手动切换质量（恢复正常的路径）：
+
+```
+00:02:00.438  btif_av_stream_stop → btif_a2dp_source_end_session_delayed
+00:02:00.439  endSession → OnSessionEnded → session_changed_cb   ← audioserver 作废旧会话/旧流
+00:02:00.674  OnSessionStarted - sampleRateHz: 96000              ← 新会话按 96k 重建
+00:02:00.837  adev_open_output_stream: sample_rate=96000         ← AudioFlinger 按 96k 重开输出流 ✓
+```
+
+#### 5.7.3 根因
+
+重放走的 `bta_av_co_set_codec_user_config` 只驱动协议栈一侧：编码器、AVDTP 对端
+都能正确切到 96 kHz；但**音频框架一侧没有一环跟进**。重放触发的 RECONFIGURE 之后，
+协议栈确实会用新 96k PCM 配置调 `BluetoothAudioClientInterface::StartSession`，
+可此时冷连接建立的旧会话（48 kHz）还活着 —— 原生直接拒绝
+（`session started already`），**没有任何人先调 EndSession**。于是：
+
+- AIDL 会话层：会话、FMQ 停留在 48 k 构型；
+- 音频策略/AudioFlinger：输出流从未以 96 k 重开（整个会话期间所有
+  `adev_open_output_stream` 均为 48000）。
+
+手动切换之所以有效：那条路径先 `btif_av_stream_stop` → `EndSession` 再
+`StartSession`，audioserver 收到 `OnSessionEnded` 作废旧流（session_changed_cb），
+AudioFlinger 重新按新会话的 96 k 打开输出流。
+
+为什么偏偏是「第二次连接」：首次选择时音频通路与协商同源，无错位可言；错位只在
+「会话已按默认 48 k 建立、重放又把它改到 96 k」这一窗口里发生 —— 而重放首次尝试
+必被原生拒绝（对端能力未取全，见 5.6.7），真正生效落在会话建立之后，所以
+**带偏好的第二次连接必然踩进窗口**。
+
+#### 5.7.4 修法
+
+把缺失的 `EndSession` 补进 `StartSession` 入口（module.cpp「会话自愈」一节）：
+
+- GOT 挂 `bluetooth::audio::aidl::BluetoothAudioClientInterface::StartSession()`
+  （GOT 槽 0xf99508）与 `EndSession()`（0xf99490）——与既有四个钩子同款手法。
+  两个函数的入口字做指纹校验（kStartSessionOrig / kEndSessionOrig），认不出
+  构建就整组跳过，不影响已装好的捕获/重放。
+- `hooked_start_session`：仅当【旧会话仍存活（g_ss_active）、属于同一个 client
+  实例（self 相同）、且处于重放窗口内】时，先调原 `EndSession(self)` 再放行原
+  `StartSession` —— 与手动切换的工作时序逐字相同。其余情况一律原样透传：窗口外、
+  其他实例、LE Audio/HFP 等其他配置文件的 StartSession 语义不变。
+- `hooked_end_session`：记录会话结束，维持存活跟踪。
+- `sr_tick`：**调用重放之前**就开 60 s 自愈窗口。
+
+效果：重放无论落在会话建立之前（原本就正确）还是之后（原 bug 窗口），音频通路
+都会跟随新采样率重建 —— OnSessionEnded → OnSessionStarted(96k) →
+`adev_open_output_stream: 96000`。代价仅为一次约 0.2-0.5 s 的音频重建间隙
+（与手动切换时的间隙相同）。
+
+**v1.2 实测踩过的两个坑（v1.3 修正，都已在设备上实证）**：
+
+1. **开窗时机必须早于重放调用。** `bta_av_co_set_codec_user_config` 在同一次调用
+   内部**同步**走完 AVDTP RECONFIGURE → `StartSession` 整条链（实测重放调用与
+   StartSession 被拒落在同一毫秒）。把开窗放在重放返回之后，等窗口打开时
+   StartSession 已经被原生拒绝完了 —— v1.2 因此自愈从未触发。
+2. **StartSession/EndSession 的返回值是 errno 风格的 int，不是 bool。**
+   反汇编实证：成功路径 `mov w22, wzr`（0），失败路径取 -16（EBUSY，即
+   "session started already"）、-22（EINVAL）、-5（EIO）、-71（EPROTO），
+   终点是 `mov w0, w22`。声明成 `bool` 时 0（成功）被转成 false、-16（失败）
+   被转成 true —— 存活记账整个反了：第一次成功的 StartSession 记为"无会话"，
+   自愈条件里的 g_ss_active 永远不成立。v1.3 改按 `int` 透传，`ret == 0` 记
+   存活、`ret == -16`（EBUSY）也如实记存活（native 侧会话确实还在）。
+   EndSession 同理（0 成功 / -71 / -22）。
+
+#### 5.7.5 验证要点
+
+装好 v1.3 后，连接耳机播放音乐，logcat 应看到：
+
+```
+LHDCV5A: 会话自愈：旧会话仍存活（重放已把采样率改为 0x8）——先结束旧会话再按新配置启动
+BTAudioSessionAidl: OnSessionEnded - SessionType=A2DP_SOFTWARE_ENCODING_DATAPATH
+BTAudioSessionAidl: OnSessionStarted - ... sampleRateHz: 96000
+BTAudioHalStream: adev_open_output_stream: ... sample_rate=96000, frames=1920
+```
+
+且听感为正常速度。若重放赶在会话建立前生效（时序靠前），则不会出现自愈日志，
+路径本就正确 —— 两种结局都不出加速。
+
+**v1.3 实测验证（2026-11-22，设备 PID 9487，偏好 96 kHz / 900 kbps）**：
+
+```
+12:05:52.210  LHDCV5A: 连接建立…第 1/12 次重放：返回 1（restart=1）   ← 首试即成功（竞速胜出路径）
+12:05:52.211  bta_av_better_stream_state_machine: API_RECONFIG OPEN -> RCFG
+12:05:52.269  btif_a2dp_source_restart_session: state=STATE_OFF
+12:05:52.321  OnSessionStarted - sampleRateHz: 96000
+12:05:52.413  adev_open_output_stream: sample_rate=96000, frames=1920
+```
+
+`session started already` 全程 0 次；`dumpsys media.audio_flinger` 的 A2DP 输出线程
+（AudioOut_20D）`Sample rate: 96000 Hz` 与 `mCodecConfig` 的 `0x8(96000)` 一致，
+听感正常、无加速。本次属「重放先于会话建立」路径；竞速失败时的自愈兜底逻辑已按
+上述两处修正就位（触发时会打印「会话自愈」日志）。
 
 ## 6. 复现与验证
 
@@ -946,6 +1069,12 @@ adb shell su -c 'sha256sum /vendor/lib64/hw/vendor.mediatek.hardware.bluetooth.a
 adb shell su -c 'logcat -d -b main | grep LHDCV5A | grep -E "重放|已生效" | tail -5'
 #    偏好落在 /data/misc/bluedroid/lhdcv5_sr.conf，一行 "<对端 MAC> <56 字节配置的 hex>"
 #    注意：升级自老格式后需要在设置里重新选一次采样率，老格式一律忽略
+
+# 8) 重放后音频不应加速（§5.7，v1.2 起）
+#    在偏好 ≠ 默认 48 kHz 时重连并播放：听感应为正常速度。若重放落在会话建立之后，
+#    日志应出现「会话自愈」，随后 OnSessionStarted 与 adev_open_output_stream
+#    都应显示新采样率（例如 96000 / frames=1920）：
+adb shell 'logcat -d -b main | grep -E "会话自愈|OnSessionEnded|OnSessionStarted|adev_open_output_stream" | tail -8'
 ```
 
 ### 6.3 回退

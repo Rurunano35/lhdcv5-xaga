@@ -6,7 +6,7 @@
 
 | 部分 | 文件 | 作用 |
 |---|---|---|
-| **Zygisk 补丁** | `zygisk/arm64-v8a.so` | 解除 `createCodec` 的机型白名单（G1）；抬高 ABR 码率上限；让用户改过的采样率跨重连保持 |
+| **Zygisk 补丁** | `zygisk/arm64-v8a.so` | 解除 `createCodec` 的机型白名单（G1）；抬高 ABR 码率上限；让用户改过的采样率跨重连保持，并在重放触发 RECONFIGURE 后补上缺失的 AIDL 会话重建（修复重连后音频约 2 倍速加速，见 `docs/LHDC-V5-通路-实现报告.md` §5.7） |
 | **开机挂载** | `post-fs-data.sh` + `payload/` | 点亮 AIDL 服务、加入 VINTF 声明、放开采样率 |
 | **关闭 A2DP offload** | `post-fs-data.sh` 第 4 步 | 把 SBC/AAC 从起不来的硬件 offload 通路挪到软件通路 |
 
